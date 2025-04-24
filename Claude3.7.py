@@ -11,11 +11,15 @@ from pathlib import Path
 
 import anthropic
 import anyio  # Import anyio library
+import tiktoken  # Import tiktoken for token counting
 from anthropic.types import MessageParam
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.panel import Panel
 from rich.progress import Progress
+from rich.live import Live
+from rich.layout import Layout
+from rich.text import Text
 from rich import print as rprint
 import unidiff
 from prompt_toolkit import PromptSession
@@ -39,9 +43,19 @@ class ClaudeSonnetCodeAssistant:
         self.context = []
         self.command_history = []
         
+        # Initialize tiktoken encoder
+        self.encoder = tiktoken.encoding_for_model("cl100k_base")  # Using cl100k_base for Claude models
+        self.max_tokens = 180000  # Max token threshold for auto-summarization
+        self.current_tokens = 0  # Current token count
+        
+        # Token usage display
+        self.layout = Layout()
+        self.token_display = Text()
+        self.update_token_display()
+        
         # Command completions
         self.commands = [
-            "code:read:", "code:changedir:", "code:listdir:", 
+            "code:read:", "code:read:files:", "code:changedir:", "code:listdir:", 
             "code:generate:", "code:change:", "code:search:", 
             "code:shell:", "help", "exit", "quit"
         ]
@@ -54,6 +68,35 @@ class ClaudeSonnetCodeAssistant:
             completer=WordCompleter(self.commands, sentence=True)
         )
 
+    def update_token_display(self):
+        """Update the token counter display."""
+        percentage = (self.current_tokens / self.max_tokens) * 100
+        color = "green"
+        if percentage > 70:
+            color = "yellow"
+        if percentage > 90:
+            color = "red"
+            
+        self.token_display = Text(f"Tokens: {self.current_tokens:,}/{self.max_tokens:,} ({percentage:.1f}%)", style=color)
+
+    def count_tokens(self, text: str) -> int:
+        """Count the number of tokens in a text."""
+        return len(self.encoder.encode(text))
+
+    def update_token_count(self):
+        """Recalculate the total token count from context."""
+        self.current_tokens = 0
+        for ctx in self.context:
+            if ctx.get("type") == "file":
+                self.current_tokens += self.count_tokens(ctx.get("content", ""))
+                self.current_tokens += self.count_tokens(ctx.get("path", ""))
+            else:
+                # For other context items
+                self.current_tokens += self.count_tokens(str(ctx))
+        
+        self.update_token_display()
+        return self.current_tokens
+
     async def start(self):
         """Start the interactive CLI session."""
         console.print(Panel.fit(
@@ -63,32 +106,43 @@ class ClaudeSonnetCodeAssistant:
             title="Welcome", subtitle="v1.0"
         ))
 
-        while True:
-            try:
-                # Get user input
-                user_input = await self.session.prompt_async(f"[{os.path.basename(self.current_dir)}] > ")
-                user_input = user_input.strip()
-                
-                if not user_input:
-                    continue
-                
-                # Handle exit commands
-                if user_input.lower() in ["exit", "quit"]:
-                    console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
-                    break
-                
-                # Process the command
-                await self.process_command(user_input)
-                
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Interrupted. Press Ctrl+C again to exit.[/yellow]")
+        with Live(self.token_display, refresh_per_second=4, console=console) as live:
+            while True:
                 try:
-                    await asyncio.sleep(1)
+                    # Update token display
+                    live.update(self.token_display)
+                    
+                    # Get user input
+                    user_input = await self.session.prompt_async(f"[{os.path.basename(self.current_dir)}] > ")
+                    user_input = user_input.strip()
+                    
+                    if not user_input:
+                        continue
+                    
+                    # Handle exit commands
+                    if user_input.lower() in ["exit", "quit"]:
+                        console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
+                        break
+                    
+                    # Process the command
+                    await self.process_command(user_input)
+                    
+                    # Check if we need to summarize
+                    if self.current_tokens > self.max_tokens:
+                        await self.auto_summarize()
+                    
+                    # Update token display
+                    live.update(self.token_display)
+                    
                 except KeyboardInterrupt:
-                    console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
-                    break
-            except Exception as e:
-                console.print(f"[bold red]Error:[/bold red] {str(e)}")
+                    console.print("\n[yellow]Interrupted. Press Ctrl+C again to exit.[/yellow]")
+                    try:
+                        await asyncio.sleep(1)
+                    except KeyboardInterrupt:
+                        console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
+                        break
+                except Exception as e:
+                    console.print(f"[bold red]Error:[/bold red] {str(e)}")
 
     async def process_command(self, command: str):
         """Process user commands."""
@@ -112,7 +166,12 @@ class ClaudeSonnetCodeAssistant:
             
             # Process different command types
             if cmd_type == "read" and len(parts) > 2:
-                await self.handle_read(parts[2])
+                # Check if it's the multi-file read command
+                if parts[2].startswith("files:"):
+                    file_list = parts[2][6:].strip()
+                    await self.handle_read_multiple(file_list)
+                else:
+                    await self.handle_read(parts[2])
             elif cmd_type == "changedir" and len(parts) > 2:
                 await self.handle_changedir(parts[2])
             elif cmd_type == "listdir" and len(parts) > 2:
@@ -147,6 +206,9 @@ class ClaudeSonnetCodeAssistant:
         [bold green]code:read:path/to/file[/bold green]
             Load a file as context for Claude
         
+        [bold green]code:read:files:file1,file2,file3[/bold green]
+            Load multiple files as context for Claude
+        
         [bold green]code:changedir:/path/to/dir[/bold green]
             Change the current working directory
         
@@ -172,8 +234,25 @@ class ClaudeSonnetCodeAssistant:
             Exit the program
         
         You can also type any message to directly chat with Claude.
+        
+        [bold]Token Management:[/bold]
+        Token usage is displayed at the bottom right.
+        Files will be automatically summarized when total tokens exceed 180,000.
         """
         console.print(Panel(help_text, title="Claude Code Assistant Help"))
+
+    async def handle_read_multiple(self, file_list: str):
+        """Read multiple files at once and add them to context."""
+        # Split the comma-separated list of files
+        files = [f.strip() for f in file_list.split(',')]
+        
+        if not files:
+            console.print("[bold red]No files specified[/bold red]")
+            return
+        
+        # Process each file
+        for file_path in files:
+            await self.handle_read(file_path)
 
     async def handle_read(self, file_path: str):
         """Read a file and add it to context."""
@@ -184,13 +263,25 @@ class ClaudeSonnetCodeAssistant:
                 syntax = Syntax(file_content, file_ext, line_numbers=True)
                 console.print(Panel(syntax, title=f"File: {file_path}"))
                 
+                # Count tokens before adding to context
+                tokens_in_file = self.count_tokens(file_content)
+                tokens_in_path = self.count_tokens(file_path)
+                total_file_tokens = tokens_in_file + tokens_in_path
+                
+                console.print(f"[cyan]File contains {tokens_in_file:,} tokens[/cyan]")
+                
                 # Add to context
                 self.context.append({
                     "type": "file",
                     "path": file_path,
-                    "content": file_content
+                    "content": file_content,
+                    "tokens": total_file_tokens
                 })
                 console.print(f"[green]Added {file_path} to context[/green]")
+                
+                # Update token count
+                self.current_tokens += total_file_tokens
+                self.update_token_display()
         except Exception as e:
             console.print(f"[bold red]Error reading file:[/bold red] {str(e)}")
 
@@ -293,12 +384,22 @@ class ClaudeSonnetCodeAssistant:
                     f.write(new_content)
                 console.print(f"[green]Saved code to {full_path}[/green]")
                 
+                # Count tokens for new file
+                tokens_in_file = self.count_tokens(new_content)
+                tokens_in_path = self.count_tokens(file_path)
+                total_file_tokens = tokens_in_file + tokens_in_path
+                
                 # Add to context
                 self.context.append({
                     "type": "file",
                     "path": file_path,
-                    "content": new_content
+                    "content": new_content,
+                    "tokens": total_file_tokens
                 })
+                
+                # Update token count
+                self.current_tokens += total_file_tokens
+                self.update_token_display()
             else:
                 console.print("[yellow]Code generation cancelled[/yellow]")
                 
@@ -315,6 +416,13 @@ class ClaudeSonnetCodeAssistant:
                 return
             
             original_content = await self.read_file(full_path)
+            
+            # Calculate tokens to remove from context if file is already there
+            old_tokens = 0
+            for i, ctx in enumerate(self.context):
+                if ctx.get("type") == "file" and ctx.get("path") == file_path:
+                    old_tokens = ctx.get("tokens", 0)
+                    break
             
             # Prepare context for Claude
             file_ext = os.path.splitext(file_path)[1].lstrip(".")
@@ -357,17 +465,33 @@ class ClaudeSonnetCodeAssistant:
                     f.write(new_content)
                 console.print(f"[green]Updated {full_path}[/green]")
                 
+                # Count tokens for updated file
+                tokens_in_file = self.count_tokens(new_content)
+                tokens_in_path = self.count_tokens(file_path)
+                total_file_tokens = tokens_in_file + tokens_in_path
+                
                 # Update context
                 for i, ctx in enumerate(self.context):
                     if ctx.get("type") == "file" and ctx.get("path") == file_path:
+                        # Remove old tokens
+                        self.current_tokens -= old_tokens
+                        # Update context entry
                         self.context[i]["content"] = new_content
+                        self.context[i]["tokens"] = total_file_tokens
+                        # Add new tokens
+                        self.current_tokens += total_file_tokens
                         break
                 else:
+                    # File wasn't in context before
                     self.context.append({
                         "type": "file",
                         "path": file_path,
-                        "content": new_content
+                        "content": new_content,
+                        "tokens": total_file_tokens
                     })
+                    self.current_tokens += total_file_tokens
+                
+                self.update_token_display()
             else:
                 console.print("[yellow]Code changes cancelled[/yellow]")
                 
@@ -460,6 +584,92 @@ class ClaudeSonnetCodeAssistant:
             
         except Exception as e:
             console.print(f"[bold red]Error communicating with Claude:[/bold red] {str(e)}")
+
+    async def auto_summarize(self):
+        """Automatically summarize files when token count exceeds threshold."""
+        console.print(f"[yellow]Token limit ({self.max_tokens:,}) exceeded. Summarizing files...[/yellow]")
+        
+        # Sort files by token count (largest first)
+        files_to_summarize = []
+        for ctx in self.context:
+            if ctx.get("type") == "file" and not ctx.get("is_summary", False):
+                files_to_summarize.append(ctx)
+        
+        # Sort by token count (descending)
+        files_to_summarize.sort(key=lambda x: x.get("tokens", 0), reverse=True)
+        
+        # Summarize files until we're under the limit
+        for file_ctx in files_to_summarize:
+            if self.current_tokens <= self.max_tokens * 0.7:  # Aim for 70% of max tokens
+                break
+                
+            file_path = file_ctx.get("path", "")
+            file_content = file_ctx.get("content", "")
+            file_tokens = file_ctx.get("tokens", 0)
+            
+            console.print(f"[yellow]Summarizing {file_path} ({file_tokens:,} tokens)[/yellow]")
+            
+            # Generate summary with Claude
+            summary = await self.generate_file_summary(file_path, file_content)
+            
+            # Calculate new token count
+            summary_tokens = self.count_tokens(summary)
+            path_tokens = self.count_tokens(file_path)
+            total_summary_tokens = summary_tokens + path_tokens
+            
+            # Update context
+            for i, ctx in enumerate(self.context):
+                if ctx is file_ctx:
+                    # Remove original tokens
+                    self.current_tokens -= file_tokens
+                    
+                    # Update with summary
+                    self.context[i]["content"] = summary
+                    self.context[i]["tokens"] = total_summary_tokens
+                    self.context[i]["is_summary"] = True
+                    self.context[i]["original_tokens"] = file_tokens
+                    
+                    # Add summary tokens
+                    self.current_tokens += total_summary_tokens
+                    break
+            
+            console.print(f"[green]Summarized {file_path}: {file_tokens:,} → {total_summary_tokens:,} tokens ({(total_summary_tokens/file_tokens)*100:.1f}%)[/green]")
+            self.update_token_display()
+            
+            # Check if we're now under the limit
+            if self.current_tokens <= self.max_tokens * 0.7:
+                break
+        
+        console.print(f"[green]Finished summarizing. Current token count: {self.current_tokens:,}[/green]")
+
+    async def generate_file_summary(self, file_path: str, content: str) -> str:
+        """Generate a summary of a file using Claude."""
+        try:
+            file_ext = os.path.splitext(file_path)[1].lstrip(".")
+            
+            messages = [
+                MessageParam(
+                    role="user", 
+                    content=f"Please summarize the following {file_ext} file so I can understand its structure and functionality. Focus on key elements that would be important for understanding how to use or modify this code. Keep implementation details brief.\n\n```{file_ext}\n{content}\n```\n\nProvide a concise summary that preserves the most important information about this file."
+                )
+            ]
+            
+            response = await self.client.messages.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=1000,
+            )
+            
+            summary = response.content[0].text
+            
+            # Format as a code summary
+            formatted_summary = f"# SUMMARY OF {file_path}\n\n{summary}\n\n# Original file was {self.count_tokens(content):,} tokens and has been summarized."
+            
+            return formatted_summary
+            
+        except Exception as e:
+            console.print(f"[bold red]Error generating summary:[/bold red] {str(e)}")
+            return f"# ERROR: Failed to summarize {file_path}\n\n{str(e)}"
 
     async def read_file(self, file_path: str) -> str:
         """Read a file asynchronously."""
