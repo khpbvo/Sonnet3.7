@@ -31,6 +31,16 @@ from prompt_toolkit.completion import WordCompleter
 console = Console()
 
 class ClaudeSonnetCodeAssistant:
+    def get_token_toolbar(self):
+        """Return the token counter string for the bottom toolbar."""
+        percentage = (self.current_tokens / self.max_tokens) * 100
+        color = "ansigreen"
+        if percentage > 70:
+            color = "ansiyellow"
+        if percentage > 90:
+            color = "ansired"
+        return f"[{color}]Tokens: {self.current_tokens:,}/{self.max_tokens:,} ({percentage:.1f}%)[/{color}]"
+        
     def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-7-sonnet-20250219"):
         """Initialize the Claude Code Assistant CLI."""
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -44,14 +54,9 @@ class ClaudeSonnetCodeAssistant:
         self.command_history = []
         
         # Initialize tiktoken encoder
-        self.encoder = tiktoken.encoding_for_model("cl100k_base")  # Using cl100k_base for Claude models
+        self.encoder = tiktoken.get_encoding("cl100k_base")  # Use get_encoding for encoding names
         self.max_tokens = 180000  # Max token threshold for auto-summarization
         self.current_tokens = 0  # Current token count
-        
-        # Token usage display
-        self.layout = Layout()
-        self.token_display = Text()
-        self.update_token_display()
         
         # Command completions
         self.commands = [
@@ -60,24 +65,14 @@ class ClaudeSonnetCodeAssistant:
             "code:shell:", "help", "exit", "quit"
         ]
         
-        # Create prompt session with history
+        # Create prompt session with history and bottom toolbar for token counter
         history_file = os.path.expanduser("~/.claude_code_assistant_history")
         self.session = PromptSession(
             history=FileHistory(history_file),
             auto_suggest=AutoSuggestFromHistory(),
-            completer=WordCompleter(self.commands, sentence=True)
+            completer=WordCompleter(self.commands, sentence=True),
+            bottom_toolbar=self.get_token_toolbar
         )
-
-    def update_token_display(self):
-        """Update the token counter display."""
-        percentage = (self.current_tokens / self.max_tokens) * 100
-        color = "green"
-        if percentage > 70:
-            color = "yellow"
-        if percentage > 90:
-            color = "red"
-            
-        self.token_display = Text(f"Tokens: {self.current_tokens:,}/{self.max_tokens:,} ({percentage:.1f}%)", style=color)
 
     def count_tokens(self, text: str) -> int:
         """Count the number of tokens in a text."""
@@ -94,7 +89,6 @@ class ClaudeSonnetCodeAssistant:
                 # For other context items
                 self.current_tokens += self.count_tokens(str(ctx))
         
-        self.update_token_display()
         return self.current_tokens
 
     async def start(self):
@@ -106,43 +100,36 @@ class ClaudeSonnetCodeAssistant:
             title="Welcome", subtitle="v1.0"
         ))
 
-        with Live(self.token_display, refresh_per_second=4, console=console) as live:
-            while True:
+        while True:
+            try:
+                # Get user input
+                user_input = await self.session.prompt_async(f"[{os.path.basename(self.current_dir)}] > ")
+                user_input = user_input.strip()
+                
+                if not user_input:
+                    continue
+                
+                # Handle exit commands
+                if user_input.lower() in ["exit", "quit"]:
+                    console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
+                    break
+                
+                # Process the command
+                await self.process_command(user_input)
+                
+                # Check if we need to summarize
+                if self.current_tokens > self.max_tokens:
+                    await self.auto_summarize()
+                
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Interrupted. Press Ctrl+C again to exit.[/yellow]")
                 try:
-                    # Update token display
-                    live.update(self.token_display)
-                    
-                    # Get user input
-                    user_input = await self.session.prompt_async(f"[{os.path.basename(self.current_dir)}] > ")
-                    user_input = user_input.strip()
-                    
-                    if not user_input:
-                        continue
-                    
-                    # Handle exit commands
-                    if user_input.lower() in ["exit", "quit"]:
-                        console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
-                        break
-                    
-                    # Process the command
-                    await self.process_command(user_input)
-                    
-                    # Check if we need to summarize
-                    if self.current_tokens > self.max_tokens:
-                        await self.auto_summarize()
-                    
-                    # Update token display
-                    live.update(self.token_display)
-                    
+                    await asyncio.sleep(1)
                 except KeyboardInterrupt:
-                    console.print("\n[yellow]Interrupted. Press Ctrl+C again to exit.[/yellow]")
-                    try:
-                        await asyncio.sleep(1)
-                    except KeyboardInterrupt:
-                        console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
-                        break
-                except Exception as e:
-                    console.print(f"[bold red]Error:[/bold red] {str(e)}")
+                    console.print("[yellow]Exiting Claude Code Assistant[/yellow]")
+                    break
+            except Exception as e:
+                console.print(f"[bold red]Error:[/bold red] {str(e)}")
 
     async def process_command(self, command: str):
         """Process user commands."""
@@ -255,22 +242,16 @@ class ClaudeSonnetCodeAssistant:
             await self.handle_read(file_path)
 
     async def handle_read(self, file_path: str):
-        """Read a file and add it to context."""
         try:
             file_content = await self.read_file(self.resolve_path(file_path))
             if file_content:
                 file_ext = os.path.splitext(file_path)[1].lstrip(".")
                 syntax = Syntax(file_content, file_ext, line_numbers=True)
                 console.print(Panel(syntax, title=f"File: {file_path}"))
-                
-                # Count tokens before adding to context
                 tokens_in_file = self.count_tokens(file_content)
                 tokens_in_path = self.count_tokens(file_path)
                 total_file_tokens = tokens_in_file + tokens_in_path
-                
                 console.print(f"[cyan]File contains {tokens_in_file:,} tokens[/cyan]")
-                
-                # Add to context
                 self.context.append({
                     "type": "file",
                     "path": file_path,
@@ -278,10 +259,7 @@ class ClaudeSonnetCodeAssistant:
                     "tokens": total_file_tokens
                 })
                 console.print(f"[green]Added {file_path} to context[/green]")
-                
-                # Update token count
                 self.current_tokens += total_file_tokens
-                self.update_token_display()
         except Exception as e:
             console.print(f"[bold red]Error reading file:[/bold red] {str(e)}")
 
@@ -333,7 +311,6 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[bold red]Error listing directory:[/bold red] {str(e)}")
 
     async def handle_generate(self, file_path: str, prompt: str):
-        """Generate new code in the specified file."""
         try:
             # Check if file already exists
             full_path = self.resolve_path(file_path)
@@ -396,10 +373,7 @@ class ClaudeSonnetCodeAssistant:
                     "content": new_content,
                     "tokens": total_file_tokens
                 })
-                
-                # Update token count
                 self.current_tokens += total_file_tokens
-                self.update_token_display()
             else:
                 console.print("[yellow]Code generation cancelled[/yellow]")
                 
@@ -407,7 +381,6 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[bold red]Error generating code:[/bold red] {str(e)}")
 
     async def handle_change(self, file_path: str, prompt: str):
-        """Modify existing code in the specified file."""
         try:
             # Read the existing file
             full_path = self.resolve_path(file_path)
@@ -445,9 +418,21 @@ class ClaudeSonnetCodeAssistant:
                     stream=True,
                 )
                 
-                async for chunk in stream:
-                    if chunk.delta.text:
-                        new_content += chunk.delta.text
+                # Process different types of events from the stream
+                async for event in stream:
+                    if hasattr(event, 'delta') and hasattr(event.delta, 'text'):
+                        # Handle ContentBlockDeltaEvent
+                        if event.delta.text:
+                            new_content += event.delta.text
+                            progress.update(task)
+                    elif hasattr(event, 'type') and event.type == 'content_block_delta':
+                        # Alternative way to handle content block delta
+                        if hasattr(event, 'delta') and hasattr(event.delta, 'text'):
+                            new_content += event.delta.text
+                            progress.update(task)
+                    elif hasattr(event, 'content_block') and hasattr(event.content_block, 'text'):
+                        # Handle ContentBlockStartEvent
+                        new_content += event.content_block.text
                         progress.update(task)
             
             # Clean up any potential markdown code blocks
@@ -473,12 +458,9 @@ class ClaudeSonnetCodeAssistant:
                 # Update context
                 for i, ctx in enumerate(self.context):
                     if ctx.get("type") == "file" and ctx.get("path") == file_path:
-                        # Remove old tokens
                         self.current_tokens -= old_tokens
-                        # Update context entry
                         self.context[i]["content"] = new_content
                         self.context[i]["tokens"] = total_file_tokens
-                        # Add new tokens
                         self.current_tokens += total_file_tokens
                         break
                 else:
@@ -490,8 +472,6 @@ class ClaudeSonnetCodeAssistant:
                         "tokens": total_file_tokens
                     })
                     self.current_tokens += total_file_tokens
-                
-                self.update_token_display()
             else:
                 console.print("[yellow]Code changes cancelled[/yellow]")
                 
@@ -562,10 +542,19 @@ class ClaudeSonnetCodeAssistant:
             # Create the full prompt
             full_prompt = f"{context_str}Working directory: {self.current_dir}\n\n{prompt}"
             
-            # Send to Claude
-            with Progress(transient=True) as progress:
-                task = progress.add_task("[cyan]Thinking...", total=None)
-                
+            # Display an animated thinking indicator
+            thinking_styles = ["[bold blue]Thinking...[/bold blue]", 
+                              "[bold green]Thinking...[/bold green]", 
+                              "[bold yellow]Thinking...[/bold yellow]", 
+                              "[bold magenta]Thinking...[/bold magenta]", 
+                              "[bold cyan]Thinking...[/bold cyan]"]
+            
+            # Create and start the thinking animation task
+            stop_thinking = asyncio.Event()
+            thinking_task = asyncio.create_task(self._animate_thinking(thinking_styles, stop_thinking))
+            
+            try:
+                # Send to Claude
                 response_text = ""
                 stream = await self.client.messages.create(
                     model=self.model,
@@ -574,72 +563,135 @@ class ClaudeSonnetCodeAssistant:
                     stream=True,
                 )
                 
-                async for chunk in stream:
-                    if chunk.delta.text:
-                        response_text += chunk.delta.text
-                        progress.update(task)
-                        console.print(chunk.delta.text, end="")
+                # Stop thinking animation and clear the line
+                stop_thinking.set()
+                await thinking_task
+                console.print("\r" + " " * 60 + "\r", end="")
+                
+                # Print "Assistant:" label in red before starting the response
+                console.print("\n[bold red]Assistant:[/bold red] ", end="")
+                
+                # Stream the response token by token with a small delay
+                async for event in stream:
+                    if hasattr(event, 'delta') and hasattr(event.delta, 'text'):
+                        # Process ContentBlockDeltaEvent
+                        chunk = event.delta.text
+                        if chunk:
+                            response_text += chunk
+                            console.print(chunk, end="", highlight=False)
+                            # Force flush to ensure immediate display
+                            sys.stdout.flush()
+                            # Add a small delay between tokens for better readability
+                            await asyncio.sleep(0.01)
+                    elif hasattr(event, 'type') and event.type == 'content_block_delta':
+                        # Alternative way to handle content block delta
+                        if hasattr(event, 'delta') and hasattr(event.delta, 'text'):
+                            chunk = event.delta.text
+                            if chunk:
+                                response_text += chunk
+                                console.print(chunk, end="", highlight=False)
+                                sys.stdout.flush()
+                                # Add a small delay between tokens for better readability
+                                await asyncio.sleep(0.01)
+                    elif hasattr(event, 'content_block') and hasattr(event.content_block, 'text'):
+                        # Handle ContentBlockStartEvent
+                        chunk = event.content_block.text
+                        if chunk:
+                            response_text += chunk
+                            console.print(chunk, end="", highlight=False)
+                            sys.stdout.flush()
+                            # Add a small delay between tokens for better readability
+                            await asyncio.sleep(0.01)
                 
                 console.print()  # newline after response
-            
+                
+            except Exception as e:
+                # Make sure to stop the thinking animation if there's an error
+                stop_thinking.set()
+                await thinking_task
+                raise e
+                
+        except anthropic.APIStatusError as e:
+            # Handle API-specific errors
+            error_message = str(e)
+            if "overloaded_error" in error_message:
+                console.print("\r[bold red]Error: Claude API is currently overloaded. Please try again in a few moments.[/bold red]")
+            else:
+                console.print(f"\r[bold red]API Error communicating with Claude:[/bold red] {str(e)}")
         except Exception as e:
-            console.print(f"[bold red]Error communicating with Claude:[/bold red] {str(e)}")
+            console.print(f"\r[bold red]Error communicating with Claude:[/bold red] {str(e)}")
+            
+    async def _animate_thinking(self, styles, stop_event):
+        """Display an animated thinking indicator like KITT from Knight Rider until stop_event is set."""
+        # Clear any previous output and ensure we're on a fresh line
+        console.print("\r", end="")
+        
+        # Use purple and orange colors for the beam
+        colors = ["[bold purple]", "[bold #FF8C00]"]  # Purple and orange (dark orange)
+        
+        position = 0
+        direction = 1  # 1 for moving right, -1 for moving left
+        max_position = 25  # Maximum width of the animation
+        dots = "●" * 3  # The beam size (3 dots)
+        
+        while not stop_event.is_set():
+            # Create the spaces before and after the beam
+            spaces_before = " " * position
+            spaces_after = " " * (max_position - position - len(dots))
+            
+            # Alternate between purple and orange
+            color = colors[int(position/2) % len(colors)]
+            
+            # Build the complete animation string on a single line
+            animation_text = f"\r{color}Thinking... {spaces_before}{dots}{spaces_after}[/]"
+            
+            # Print without newline and flush
+            console.print(animation_text, end="")
+            sys.stdout.flush()
+            
+            # Update position for next iteration
+            position += direction
+            
+            # Change direction when hitting the edges
+            if position > max_position - len(dots) or position < 0:
+                direction *= -1
+            
+            # Control speed
+            await asyncio.sleep(0.09)
+        
+        # Clear the thinking indicator line when done
+        console.print("\r" + " " * (max_position + 20) + "\r", end="")
 
     async def auto_summarize(self):
-        """Automatically summarize files when token count exceeds threshold."""
         console.print(f"[yellow]Token limit ({self.max_tokens:,}) exceeded. Summarizing files...[/yellow]")
-        
-        # Sort files by token count (largest first)
         files_to_summarize = []
         for ctx in self.context:
             if ctx.get("type") == "file" and not ctx.get("is_summary", False):
                 files_to_summarize.append(ctx)
-        
-        # Sort by token count (descending)
         files_to_summarize.sort(key=lambda x: x.get("tokens", 0), reverse=True)
-        
-        # Summarize files until we're under the limit
         for file_ctx in files_to_summarize:
-            if self.current_tokens <= self.max_tokens * 0.7:  # Aim for 70% of max tokens
+            if self.current_tokens <= self.max_tokens * 0.7:
                 break
-                
             file_path = file_ctx.get("path", "")
             file_content = file_ctx.get("content", "")
             file_tokens = file_ctx.get("tokens", 0)
-            
             console.print(f"[yellow]Summarizing {file_path} ({file_tokens:,} tokens)[/yellow]")
-            
-            # Generate summary with Claude
             summary = await self.generate_file_summary(file_path, file_content)
-            
-            # Calculate new token count
             summary_tokens = self.count_tokens(summary)
             path_tokens = self.count_tokens(file_path)
             total_summary_tokens = summary_tokens + path_tokens
-            
-            # Update context
             for i, ctx in enumerate(self.context):
                 if ctx is file_ctx:
-                    # Remove original tokens
                     self.current_tokens -= file_tokens
-                    
-                    # Update with summary
                     self.context[i]["content"] = summary
                     self.context[i]["tokens"] = total_summary_tokens
                     self.context[i]["is_summary"] = True
                     self.context[i]["original_tokens"] = file_tokens
-                    
-                    # Add summary tokens
                     self.current_tokens += total_summary_tokens
                     break
-            
             console.print(f"[green]Summarized {file_path}: {file_tokens:,} → {total_summary_tokens:,} tokens ({(total_summary_tokens/file_tokens)*100:.1f}%)[/green]")
-            self.update_token_display()
-            
-            # Check if we're now under the limit
             if self.current_tokens <= self.max_tokens * 0.7:
                 break
-        
         console.print(f"[green]Finished summarizing. Current token count: {self.current_tokens:,}[/green]")
 
     async def generate_file_summary(self, file_path: str, content: str) -> str:
@@ -752,32 +804,47 @@ class ClaudeSonnetCodeAssistant:
         """Create a colored unified diff."""
         try:
             # Create temporary files for diffing
-            original_lines = original.splitlines(True)
-            new_lines = new.splitlines(True)
+            import tempfile
+            import os
             
-            # Create a unified diff
-            diff = unidiff.PatchSet.from_string(
-                ''.join(unidiff.unified_diff(
-                    original_lines,
-                    new_lines,
-                    fromfile=f"a/{file_path}",
-                    tofile=f"b/{file_path}"
-                ))
-            )
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as old_file:
+                old_file.write(original)
+                old_file_path = old_file.name
+                
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as new_file:
+                new_file.write(new)
+                new_file_path = new_file.name
             
-            # Convert to string and colorize
-            diff_text = ""
-            for line in str(diff).splitlines():
-                if line.startswith('+'):
-                    diff_text += f"[green]{line}[/green]\n"
-                elif line.startswith('-'):
-                    diff_text += f"[red]{line}[/red]\n"
-                elif line.startswith('@'):
-                    diff_text += f"[cyan]{line}[/cyan]\n"
-                else:
-                    diff_text += f"{line}\n"
-            
-            return Panel(diff_text, title=f"Diff for {file_path}", border_style="blue")
+            try:
+                # Use the 'diff' command to create a unified diff
+                proc = await asyncio.create_subprocess_exec(
+                    'diff', '-u', old_file_path, new_file_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await proc.communicate()
+                diff_output = stdout.decode()
+                
+                # Skip unidiff parsing and just colorize the output directly
+                diff_text = ""
+                for line in diff_output.splitlines():
+                    if line.startswith('+'):
+                        diff_text += f"[green]{line}[/green]\n"
+                    elif line.startswith('-'):
+                        diff_text += f"[red]{line}[/red]\n"
+                    elif line.startswith('@'):
+                        diff_text += f"[cyan]{line}[/cyan]\n"
+                    else:
+                        diff_text += f"{line}\n"
+                
+                return Panel(diff_text, title=f"Diff for {file_path}", border_style="blue")
+                
+            finally:
+                # Clean up temporary files
+                os.unlink(old_file_path)
+                os.unlink(new_file_path)
+                
         except Exception as e:
             return f"[bold red]Error creating diff:[/bold red] {str(e)}"
 
