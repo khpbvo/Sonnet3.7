@@ -6,7 +6,7 @@ import subprocess
 import glob
 import re
 import argparse
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 from pathlib import Path
 
 import anthropic
@@ -57,6 +57,10 @@ class ClaudeSonnetCodeAssistant:
         self.encoder = tiktoken.get_encoding("cl100k_base")  # Use get_encoding for encoding names
         self.max_tokens = 180000  # Max token threshold for auto-summarization
         self.current_tokens = 0  # Current token count
+        
+        # Diff settings
+        self.max_diff_size = 20  # Maximum number of changed lines before auto-segmenting diffs
+        self.always_use_vim_style = False  # Whether to always use the VIM-style diff viewer
         
         # Command completions
         self.commands = [
@@ -225,6 +229,12 @@ class ClaudeSonnetCodeAssistant:
         [bold]Token Management:[/bold]
         Token usage is displayed at the bottom right.
         Files will be automatically summarized when total tokens exceed 180,000.
+
+        [bold]Diff Operations:[/bold]
+        When changing files, line numbers are shown and changes can be:
+        - Broken into multiple smaller segments for easier review
+        - Reviewed in an interactive VIM-like interface
+        - Applied selectively (accept/reject specific change segments)
         """
         console.print(Panel(help_text, title="Claude Code Assistant Help"))
 
@@ -346,23 +356,80 @@ class ClaudeSonnetCodeAssistant:
                         new_content += chunk.delta.text
                         progress.update(task)
             
-            # Show the diff
-            diff = await self.create_colored_diff(original_content, new_content, file_path)
-            console.print(diff)
+            # Clean up any potential markdown code blocks
+            new_content = re.sub(r'```[\w]*\n', '', new_content)
+            new_content = new_content.replace('```', '')
             
-            # Ask for confirmation before saving
-            confirm = input("Save this code? (y/n): ").strip().lower()
-            if confirm == 'y':
+            # Determine if we need to show diffs (only if file already exists)
+            if original_content:
+                # Analyze and break down changes if needed
+                segments = await self.analyze_and_segment_changes(original_content, new_content, file_path)
+                
+                final_content = original_content
+                if len(segments) == 1:
+                    # Just one segment, show regular diff
+                    diff = await self.create_colored_diff(original_content, new_content, file_path, enhanced=True)
+                    console.print(diff)
+                    
+                    # Ask if they want to use interactive diff viewer
+                    use_interactive = input("Would you like to use the interactive diff viewer? (y/n): ").strip().lower() == 'y'
+                    
+                    if use_interactive:
+                        accepted, final_content = await self.interactive_diff_review(original_content, new_content, file_path)
+                    else:
+                        # Regular confirmation
+                        confirm = input("Apply these changes? (y/n): ").strip().lower()
+                        accepted = confirm == 'y'
+                        final_content = new_content if accepted else original_content
+                else:
+                    # Multiple segments, review each one
+                    console.print(f"[yellow]Changes have been divided into {len(segments)} segments for easier review.[/yellow]")
+                    
+                    # Start with the original content
+                    working_content = original_content
+                    
+                    # Process each segment
+                    for i, (segment_old, segment_new, segment_name) in enumerate(segments):
+                        console.print(f"[bold]Segment {i+1}/{len(segments)}: {segment_name}[/bold]")
+                        
+                        # Show diff for this segment
+                        segment_diff = await self.create_colored_diff(segment_old, segment_new, f"{file_path} (Segment {i+1})", enhanced=True)
+                        console.print(segment_diff)
+                        
+                        # Ask for confirmation
+                        confirm = input(f"Apply changes for segment {i+1}? (y/n): ").strip().lower()
+                        if confirm == 'y':
+                            # Apply this segment's changes
+                            working_content = working_content.replace(segment_old, segment_new)
+                            console.print(f"[green]Applied changes for segment {i+1}[/green]")
+                        else:
+                            console.print(f"[yellow]Skipped changes for segment {i+1}[/yellow]")
+                    
+                    final_content = working_content
+                    accepted = final_content != original_content
+            else:
+                # New file, just show the generated code 
+                file_ext = os.path.splitext(file_path)[1].lstrip(".")
+                syntax = Syntax(new_content, file_ext, line_numbers=True)
+                console.print(Panel(syntax, title=f"Generated code for: {file_path}"))
+                
+                # Ask for confirmation
+                confirm = input("Save this code? (y/n): ").strip().lower()
+                accepted = confirm == 'y'
+                final_content = new_content if accepted else ""
+            
+            # If accepted and has content, save the file
+            if accepted and final_content:
                 # Ensure directory exists
                 os.makedirs(os.path.dirname(os.path.abspath(full_path)), exist_ok=True)
                 
                 # Write the file
                 with open(full_path, 'w') as f:
-                    f.write(new_content)
+                    f.write(final_content)
                 console.print(f"[green]Saved code to {full_path}[/green]")
                 
                 # Count tokens for new file
-                tokens_in_file = self.count_tokens(new_content)
+                tokens_in_file = self.count_tokens(final_content)
                 tokens_in_path = self.count_tokens(file_path)
                 total_file_tokens = tokens_in_file + tokens_in_path
                 
@@ -370,7 +437,7 @@ class ClaudeSonnetCodeAssistant:
                 self.context.append({
                     "type": "file",
                     "path": file_path,
-                    "content": new_content,
+                    "content": final_content,
                     "tokens": total_file_tokens
                 })
                 self.current_tokens += total_file_tokens
@@ -439,19 +506,60 @@ class ClaudeSonnetCodeAssistant:
             new_content = re.sub(r'```[\w]*\n', '', new_content)
             new_content = new_content.replace('```', '')
             
-            # Show the diff
-            diff = await self.create_colored_diff(original_content, new_content, file_path)
-            console.print(diff)
+            # Analyze and break down changes if needed
+            segments = await self.analyze_and_segment_changes(original_content, new_content, file_path)
             
-            # Ask for confirmation before saving
-            confirm = input("Apply these changes? (y/n): ").strip().lower()
-            if confirm == 'y':
+            final_content = original_content
+            if len(segments) == 1:
+                # Just one segment, show regular diff
+                diff = await self.create_colored_diff(original_content, new_content, file_path, enhanced=True)
+                console.print(diff)
+                
+                # Ask if they want to use interactive diff viewer
+                use_interactive = input("Would you like to use the interactive diff viewer? (y/n): ").strip().lower() == 'y'
+                
+                if use_interactive:
+                    accepted, final_content = await self.interactive_diff_review(original_content, new_content, file_path)
+                else:
+                    # Regular confirmation
+                    confirm = input("Apply these changes? (y/n): ").strip().lower()
+                    accepted = confirm == 'y'
+                    final_content = new_content if accepted else original_content
+            else:
+                # Multiple segments, review each one
+                console.print(f"[yellow]Changes have been divided into {len(segments)} segments for easier review.[/yellow]")
+                
+                # Start with the original content
+                working_content = original_content
+                
+                # Process each segment
+                for i, (segment_old, segment_new, segment_name) in enumerate(segments):
+                    console.print(f"[bold]Segment {i+1}/{len(segments)}: {segment_name}[/bold]")
+                    
+                    # Show diff for this segment
+                    segment_diff = await self.create_colored_diff(segment_old, segment_new, f"{file_path} (Segment {i+1})", enhanced=True)
+                    console.print(segment_diff)
+                    
+                    # Ask for confirmation
+                    confirm = input(f"Apply changes for segment {i+1}? (y/n): ").strip().lower()
+                    if confirm == 'y':
+                        # Apply this segment's changes
+                        working_content = working_content.replace(segment_old, segment_new)
+                        console.print(f"[green]Applied changes for segment {i+1}[/green]")
+                    else:
+                        console.print(f"[yellow]Skipped changes for segment {i+1}[/yellow]")
+                
+                final_content = working_content
+                accepted = final_content != original_content
+            
+            # If changes were accepted, save the file
+            if accepted:
                 with open(full_path, 'w') as f:
-                    f.write(new_content)
+                    f.write(final_content)
                 console.print(f"[green]Updated {full_path}[/green]")
                 
                 # Count tokens for updated file
-                tokens_in_file = self.count_tokens(new_content)
+                tokens_in_file = self.count_tokens(final_content)
                 tokens_in_path = self.count_tokens(file_path)
                 total_file_tokens = tokens_in_file + tokens_in_path
                 
@@ -459,7 +567,7 @@ class ClaudeSonnetCodeAssistant:
                 for i, ctx in enumerate(self.context):
                     if ctx.get("type") == "file" and ctx.get("path") == file_path:
                         self.current_tokens -= old_tokens
-                        self.context[i]["content"] = new_content
+                        self.context[i]["content"] = final_content
                         self.context[i]["tokens"] = total_file_tokens
                         self.current_tokens += total_file_tokens
                         break
@@ -468,7 +576,7 @@ class ClaudeSonnetCodeAssistant:
                     self.context.append({
                         "type": "file",
                         "path": file_path,
-                        "content": new_content,
+                        "content": final_content,
                         "tokens": total_file_tokens
                     })
                     self.current_tokens += total_file_tokens
@@ -800,8 +908,8 @@ class ClaudeSonnetCodeAssistant:
         except Exception as e:
             console.print(f"[bold red]Error searching code:[/bold red] {str(e)}")
 
-    async def create_colored_diff(self, original: str, new: str, file_path: str) -> str:
-        """Create a colored unified diff with line numbers."""
+    async def create_colored_diff(self, original: str, new: str, file_path: str, enhanced: bool = True) -> str:
+        """Create a colored unified diff with explicit line numbers."""
         try:
             # Create temporary files for diffing
             import tempfile
@@ -820,9 +928,9 @@ class ClaudeSonnetCodeAssistant:
                 # -u shows unified diff format
                 # -N treats absent files as empty
                 # -p shows the function name for each change
-                # -U10 shows 10 lines of unified context (increase for more context)
+                # -U3 shows 3 lines of unified context
                 proc = await asyncio.create_subprocess_exec(
-                    'diff', '-u', '-N', '-p', '-U10', old_file_path, new_file_path,
+                    'diff', '-u', '-N', '-p', '-U3', old_file_path, new_file_path,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
@@ -830,22 +938,79 @@ class ClaudeSonnetCodeAssistant:
                 stdout, stderr = await proc.communicate()
                 diff_output = stdout.decode()
                 
-                # Colorize the output directly with line numbers preserved
-                diff_text = ""
-                for line in diff_output.splitlines():
-                    if line.startswith('+'):
-                        diff_text += f"[green]{line}[/green]\n"
-                    elif line.startswith('-'):
-                        diff_text += f"[red]{line}[/red]\n"
-                    elif line.startswith('@@'):
-                        # This line contains the line numbers information
-                        diff_text += f"[bold cyan]{line}[/bold cyan]\n"
-                    else:
-                        diff_text += f"{line}\n"
+                # Parse the diff to extract hunk information and add explicit line numbers
+                diff_lines = diff_output.splitlines()
+                enhanced_diff = []
                 
-                # Add a note about reading the diff
-                diff_text += "\n[dim]Note: Line numbers are shown in the @@ markers above.[/dim]\n"
-                diff_text += "[dim]Format: @@ -old_start,old_count +new_start,new_count @@[/dim]"
+                # Track current line numbers in both files
+                old_line_num = 0
+                new_line_num = 0
+                in_hunk = False
+                
+                for line in diff_lines:
+                    if line.startswith('---') or line.startswith('+++'):
+                        # File headers
+                        enhanced_diff.append(line)
+                    elif line.startswith('@@'):
+                        # Extract line numbers from hunk headers
+                        # Format: @@ -old_start,old_count +new_start,new_count @@
+                        in_hunk = True
+                        parts = line.split(' ')
+                        old_info = parts[1][1:]  # Remove the leading '-'
+                        new_info = parts[2][1:]  # Remove the leading '+'
+                        
+                        if ',' in old_info:
+                            old_start = int(old_info.split(',')[0])
+                        else:
+                            old_start = int(old_info)
+                            
+                        if ',' in new_info:
+                            new_start = int(new_info.split(',')[0])
+                        else:
+                            new_start = int(new_info)
+                        
+                        old_line_num = old_start
+                        new_line_num = new_start
+                        
+                        # Add a more prominent hunk header with better line number info
+                        if enhanced:
+                            enhanced_diff.append(f"[bold cyan]{line}[/bold cyan]")
+                            enhanced_diff.append(f"[bold cyan]--- Lines {old_start}+ in original[/bold cyan]")
+                            enhanced_diff.append(f"[bold cyan]+++ Lines {new_start}+ in new version[/bold cyan]")
+                        else:
+                            enhanced_diff.append(f"[bold cyan]{line}[/bold cyan]")
+                    else:
+                        # Content lines with explicit line numbers
+                        if line.startswith('+'):
+                            prefix = f"{new_line_num:4d}+ " if enhanced else ""
+                            enhanced_diff.append(f"[green]{prefix}{line}[/green]")
+                            new_line_num += 1
+                        elif line.startswith('-'):
+                            prefix = f"{old_line_num:4d}- " if enhanced else ""
+                            enhanced_diff.append(f"[red]{prefix}{line}[/red]")
+                            old_line_num += 1
+                        else:
+                            if in_hunk:
+                                old_prefix = f"{old_line_num:4d}  " if enhanced else ""
+                                new_prefix = f"{new_line_num:4d}  " if enhanced else ""
+                                if enhanced:
+                                    enhanced_diff.append(f"{old_prefix}{new_prefix} {line}")
+                                else:
+                                    enhanced_diff.append(line)
+                                old_line_num += 1
+                                new_line_num += 1
+                            else:
+                                enhanced_diff.append(line)
+                
+                diff_text = "\n".join(enhanced_diff)
+                
+                # Check if the changes are very large (more than 20 lines changed)
+                plus_count = len([line for line in diff_lines if line.startswith('+')])
+                minus_count = len([line for line in diff_lines if line.startswith('-')])
+                total_changes = plus_count + minus_count
+                
+                if total_changes > 20:
+                    diff_text += f"\n\n[bold yellow]Warning: This is a large change ({total_changes} lines). Consider breaking it into smaller edits for better review.[/bold yellow]"
                 
                 return Panel(diff_text, title=f"Diff for {file_path}", border_style="blue")
                 
@@ -857,29 +1022,225 @@ class ClaudeSonnetCodeAssistant:
         except Exception as e:
             return f"[bold red]Error creating diff:[/bold red] {str(e)}"
 
-    def resolve_path(self, path: str) -> str:
-        """Resolve a path relative to the current directory."""
-        if os.path.isabs(path):
-            return os.path.normpath(path)
-        else:
-            return os.path.normpath(os.path.join(self.current_dir, path))
+    async def interactive_diff_review(self, original: str, new: str, file_path: str) -> Tuple[bool, str]:
+        """Provide an interactive VIM-like diff review experience.
+        
+        Returns:
+            Tuple of (accepted, final_content)
+        """
+        try:
+            # Create unified diff for display
+            diff = await self.create_colored_diff(original, new, file_path, enhanced=True)
+            console.print(diff)
+            
+            # Since a full VIM-like interface requires complex terminal handling,
+            # we'll implement a simplified interactive review
+            console.print("\n[bold cyan]Interactive Diff Review (VIM-inspired)[/bold cyan]")
+            console.print("Commands: a (accept all), r (reject all), s (skip to next diff chunk), v (view current chunk), q (quit)")
+            
+            # Parse the original and new content into lines
+            old_lines = original.splitlines()
+            new_lines = new.splitlines()
+            
+            # Use difflib to get line-by-line diff
+            import difflib
+            differ = difflib.Differ()
+            diff_lines = list(differ.compare(old_lines, new_lines))
+            
+            # Find diff chunks (continuous groups of changes)
+            chunks = []
+            current_chunk = []
+            in_chunk = False
+            
+            for i, line in enumerate(diff_lines):
+                if line.startswith('+ ') or line.startswith('- '):
+                    if not in_chunk:
+                        in_chunk = True
+                        # Add some context lines before the chunk
+                        start_idx = max(0, i - 3)
+                        current_chunk = diff_lines[start_idx:i]
+                    current_chunk.append(line)
+                else:
+                    if in_chunk:
+                        # Add some context lines after the chunk
+                        current_chunk.append(line)
+                        if len(current_chunk) >= 3 or i == len(diff_lines) - 1:
+                            chunks.append(current_chunk)
+                            current_chunk = []
+                            in_chunk = False
+            
+            # If there's a partial chunk left, add it
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            # If no chunks, it means no changes
+            if not chunks:
+                console.print("[yellow]No differences found.[/yellow]")
+                return False, original
+            
+            # Review each chunk
+            working_content = original
+            current_chunk_idx = 0
+            
+            while current_chunk_idx < len(chunks):
+                chunk = chunks[current_chunk_idx]
+                
+                # Display the current chunk with line numbers
+                console.print(f"\n[bold]Chunk {current_chunk_idx+1}/{len(chunks)}:[/bold]")
+                for i, line in enumerate(chunk):
+                    if line.startswith('+ '):
+                        console.print(f"[green]{i+1:3d}: {line}[/green]")
+                    elif line.startswith('- '):
+                        console.print(f"[red]{i+1:3d}: {line}[/red]")
+                    else:
+                        console.print(f"{i+1:3d}: {line}")
+                
+                # Get command
+                cmd = input("\nCommand (a/r/s/v/q): ").strip().lower()
+                
+                if cmd == 'a':
+                    # Accept all remaining changes
+                    return True, new
+                elif cmd == 'r':
+                    # Reject all changes
+                    return False, original
+                elif cmd == 's':
+                    # Skip to next chunk
+                    current_chunk_idx += 1
+                elif cmd == 'v':
+                    # Just view the current chunk again
+                    pass
+                elif cmd == 'q':
+                    # Quit with current changes
+                    break
+                else:
+                    console.print("[yellow]Unknown command. Try again.[/yellow]")
+            
+            # After review, ask for final confirmation
+            console.print("\n[bold]Review completed.[/bold]")
+            confirm = input("Apply all accepted changes? (y/n): ").strip().lower()
+            if confirm == 'y':
+                return True, new
+            else:
+                return False, original
+            
+        except Exception as e:
+            console.print(f"[bold red]Error in interactive diff:[/bold red] {str(e)}")
+            # Fall back to non-interactive diff on error
+            return await self.non_interactive_diff_confirm(original, new)
 
-async def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="Claude Sonnet Code Assistant")
-    parser.add_argument("--api-key", help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
-    parser.add_argument("--model", default="claude-3-7-sonnet-20250219", help="Claude model to use")
-    
-    args = parser.parse_args()
-    
-    try:
-        assistant = ClaudeSonnetCodeAssistant(api_key=args.api_key, model=args.model)
-        await assistant.start()
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        sys.exit(1)
+    async def non_interactive_diff_confirm(self, original: str, new: str) -> Tuple[bool, str]:
+        """Fall back to simple confirmation if interactive mode fails."""
+        confirm = input("Apply these changes? (y/n): ").strip().lower()
+        return confirm == 'y', new if confirm == 'y' else original
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    async def analyze_and_segment_changes(self, original: str, new: str, file_path: str):
+        """Analyze changes and recommend/implement segmented edits if changes are large."""
+        # Parse files into lines
+        old_lines = original.splitlines()
+        new_lines = new.splitlines()
+        
+        # Use difflib to find unified diff
+        import difflib
+        diff = list(difflib.unified_diff(old_lines, new_lines, n=3))
+        diff_text = '\n'.join(diff)
+        
+        # Calculate change size
+        plus_lines = len([line for line in diff if line.startswith('+')])
+        minus_lines = len([line for line in diff if line.startswith('-')])
+        total_changes = plus_lines + minus_lines
+        
+        # If changes are small, return the original and new as is
+        if total_changes <= self.max_diff_size:
+            return [(original, new, "All changes")]
+        
+        # For large changes, try to segment them
+        console.print("[yellow]Large changes detected. Attempting to break down into smaller segments...[/yellow]")
+        
+        # Use sequence matcher to find matching blocks that can serve as segment boundaries
+        s = difflib.SequenceMatcher(None, old_lines, new_lines)
+        matches = s.get_matching_blocks()
+        
+        # Identify potential segment points (significant matches surrounded by changes)
+        segment_points = []
+        for i, j, n in matches:
+            if n > 5:  # Only consider matches of 5+ lines as segment boundaries
+                segment_points.append((i, j))
+        
+        # If we can't find good segment points, fall back to dividing evenly
+        if len(segment_points) <= 1:
+            console.print("[yellow]Could not find natural segments. Creating segments by size...[/yellow]")
+            
+            # Create maximum 5 segments
+            target_segment_size = max(10, total_changes // 5)
+            
+            segments = []
+            segment_old_lines = []
+            segment_new_lines = []
+            current_count = 0
+            
+            for i, old_line in enumerate(old_lines):
+                # Try to find corresponding new line
+                segment_old_lines.append(old_line)
+                
+                # Check if there's a matching line in new_lines
+                if i < len(new_lines):
+                    segment_new_lines.append(new_lines[i])
+                    if old_line != new_lines[i]:
+                        current_count += 1
+                else:
+                    # This line was removed
+                    current_count += 1
+                
+                # If we've reached the target segment size, create a segment
+                if current_count >= target_segment_size:
+                    segments.append((
+                        '\n'.join(segment_old_lines), 
+                        '\n'.join(segment_new_lines),
+                        f"Lines {len(segments)*target_segment_size+1}-{(len(segments)+1)*target_segment_size}"
+                    ))
+                    segment_old_lines = []
+                    segment_new_lines = []
+                    current_count = 0
+            
+            # Add any remaining segment
+            if segment_old_lines or segment_new_lines:
+                start_line = len(segments) * target_segment_size + 1
+                end_line = start_line + len(segment_old_lines) - 1
+                segments.append((
+                    '\n'.join(segment_old_lines), 
+                    '\n'.join(segment_new_lines),
+                    f"Lines {start_line}-{end_line}"
+                ))
+            
+            return segments
+        
+        # Create segments based on natural boundaries
+        segments = []
+        last_old_idx = 0
+        last_new_idx = 0
+        
+        for i, (old_idx, new_idx) in enumerate(segment_points):
+            if old_idx > last_old_idx or new_idx > last_new_idx:  # Only create segments if there's something to include
+                # Create a segment from the last point to this one
+                old_segment = '\n'.join(old_lines[last_old_idx:old_idx])
+                new_segment = '\n'.join(new_lines[last_new_idx:new_idx])
+                
+                segment_name = f"Lines {last_old_idx+1}-{old_idx} (old) / {last_new_idx+1}-{new_idx} (new)"
+                segments.append((old_segment, new_segment, segment_name))
+                
+                last_old_idx = old_idx
+                last_new_idx = new_idx
+        
+        # Add the final segment if needed
+        if last_old_idx < len(old_lines) or last_new_idx < len(new_lines):
+            old_segment = '\n'.join(old_lines[last_old_idx:])
+            new_segment = '\n'.join(new_lines[last_new_idx:])
+            segment_name = f"Lines {last_old_idx+1}-{len(old_lines)} (old) / {last_new_idx+1}-{len(new_lines)} (new)"
+            segments.append((old_segment, new_segment, segment_name))
+        
+        # If we ended up with only one segment, return the original and new as is
+        if len(segments) <= 1:
+            return [(original, new, "All changes")]
+            
+        return segments
