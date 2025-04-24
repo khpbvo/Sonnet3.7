@@ -801,7 +801,7 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[bold red]Error searching code:[/bold red] {str(e)}")
 
     async def create_colored_diff(self, original: str, new: str, file_path: str) -> str:
-        """Create a colored unified diff."""
+        """Create a colored unified diff with line numbers."""
         try:
             # Create temporary files for diffing
             import tempfile
@@ -816,9 +816,13 @@ class ClaudeSonnetCodeAssistant:
                 new_file_path = new_file.name
             
             try:
-                # Use the 'diff' command to create a unified diff
+                # Use the 'diff' command to create a unified diff with more context lines and line numbers
+                # -u shows unified diff format
+                # -N treats absent files as empty
+                # -p shows the function name for each change
+                # -U10 shows 10 lines of unified context (increase for more context)
                 proc = await asyncio.create_subprocess_exec(
-                    'diff', '-u', old_file_path, new_file_path,
+                    'diff', '-u', '-N', '-p', '-U10', old_file_path, new_file_path,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
@@ -826,17 +830,22 @@ class ClaudeSonnetCodeAssistant:
                 stdout, stderr = await proc.communicate()
                 diff_output = stdout.decode()
                 
-                # Skip unidiff parsing and just colorize the output directly
+                # Colorize the output directly with line numbers preserved
                 diff_text = ""
                 for line in diff_output.splitlines():
                     if line.startswith('+'):
                         diff_text += f"[green]{line}[/green]\n"
                     elif line.startswith('-'):
                         diff_text += f"[red]{line}[/red]\n"
-                    elif line.startswith('@'):
-                        diff_text += f"[cyan]{line}[/cyan]\n"
+                    elif line.startswith('@@'):
+                        # This line contains the line numbers information
+                        diff_text += f"[bold cyan]{line}[/bold cyan]\n"
                     else:
                         diff_text += f"{line}\n"
+                
+                # Add a note about reading the diff
+                diff_text += "\n[dim]Note: Line numbers are shown in the @@ markers above.[/dim]\n"
+                diff_text += "[dim]Format: @@ -old_start,old_count +new_start,new_count @@[/dim]"
                 
                 return Panel(diff_text, title=f"Diff for {file_path}", border_style="blue")
                 
