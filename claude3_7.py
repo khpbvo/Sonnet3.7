@@ -39,7 +39,9 @@ class ClaudeSonnetCodeAssistant:
             color = "ansiyellow"
         if percentage > 90:
             color = "ansired"
-        return f"[{color}]Tokens: {self.current_tokens:,}/{self.max_tokens:,} ({percentage:.1f}%)[/{color}]"
+        return (
+            f"[{color}]Tokens: {self.current_tokens:,}/{self.max_tokens:,} ({percentage:.1f}%)[/{color}]"
+        )
 
     def __init__(
         self, api_key: Optional[str] = None, model: str = "claude-3-7-sonnet-20250219"
@@ -48,7 +50,8 @@ class ClaudeSonnetCodeAssistant:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not self.api_key:
             raise ValueError(
-                "API key must be provided or set as ANTHROPIC_API_KEY environment variable"
+                "API key must be provided or set as "
+                "ANTHROPIC_API_KEY environment variable"
             )
 
         self.model = model
@@ -88,7 +91,9 @@ class ClaudeSonnetCodeAssistant:
         ]
 
         # Create prompt session with history and bottom toolbar for token counter
-        history_file = os.path.expanduser("~/.claude_code_assistant_history")
+        history_file = os.path.expanduser(
+            "~/.claude_code_assistant_history"
+        )
         self.session = PromptSession(
             history=FileHistory(history_file),
             auto_suggest=AutoSuggestFromHistory(),
@@ -119,7 +124,10 @@ class ClaudeSonnetCodeAssistant:
             Panel.fit(
                 "[bold blue]Claude Sonnet Code Assistant[/bold blue]\n"
                 f"[green]Using model: {self.model}[/green]\n"
-                "Type [bold]help[/bold] for available commands or [bold]exit[/bold] to quit",
+                (
+                    "Type [bold]help[/bold] for available commands or "
+                    "[bold]exit[/bold] to quit"
+                ),
                 title="Welcome",
                 subtitle="v1.0",
             )
