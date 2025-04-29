@@ -778,6 +778,8 @@ class ClaudeSonnetCodeAssistant:
                             self.context.append({'type': 'file', 'path': fpath, 'content': cont, 'tokens': tok})
                             self.current_tokens += tok
                             console.print(f"[green]Added {fpath}[/green]")
+        except Exception as e:
+            console.print(f"[bold red]Error asking Claude:[/bold red] {str(e)}")
 
     async def handle_change(self, file_path: str, prompt: str):
         """Request Claude to change a file using the text-editor-tool."""
