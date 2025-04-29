@@ -356,9 +356,9 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[bold red]Error listing directory:[/bold red] {str(e)}")
 
     async def handle_generate(self, file_path: str, prompt: str):
-        """Request Claude to generate code for a file using the text-editor-tool."""
-        # Just prompt Claude; let it use the tool-use protocol for file creation/edits
-        await self.ask_claude(f"Please generate code for the file '{file_path}' with the following requirements: {prompt}. Use the text-editor-tool to create or edit the file as needed.")
+        """Request Claude to generate code for a file using the text_editor_20250124 tool."""
+        # Use a more explicit prompt that refers to the exact tool name
+        await self.ask_claude(f"Please generate code for the file '{file_path}' with the following requirements: {prompt}. Use the text_editor_20250124 tool to create or edit the file as needed.")
 
     async def _handle_change_deprecated(self, file_path: str, prompt: str):
         """Deprecated implementation - kept for reference."""
@@ -782,17 +782,17 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[bold red]Error asking Claude:[/bold red] {str(e)}")
 
     async def handle_change(self, file_path: str, prompt: str):
-        """Request Claude to change a file using the text-editor-tool."""
+        """Generate a diff and modify a file based on the prompt."""
         try:
-            # First, ensure the file is in context by loading it
+            # First, ensure the file exists and read its content
             resolved_path = await self.resolve_path(file_path)
             if not os.path.exists(resolved_path):
                 console.print(f"[bold red]File does not exist:[/bold red] {resolved_path}")
                 return
             
             # Read the file content
-            file_content = await self.read_file(resolved_path)
-            if not file_content:
+            original_content = await self.read_file(resolved_path)
+            if not original_content:
                 console.print(f"[bold red]Could not read file:[/bold red] {resolved_path}")
                 return
                 
@@ -804,31 +804,112 @@ class ClaudeSonnetCodeAssistant:
                     break
                     
             if not file_in_context:
-                tokens_in_file = self.count_tokens(file_content)
+                tokens_in_file = self.count_tokens(original_content)
                 tokens_in_path = self.count_tokens(file_path)
                 total_file_tokens = tokens_in_file + tokens_in_path
                 self.context.append({
                     "type": "file",
                     "path": file_path,
-                    "content": file_content,
+                    "content": original_content,
                     "tokens": total_file_tokens,
                 })
                 self.current_tokens += total_file_tokens
                 console.print(f"[green]Added {file_path} to context[/green]")
             
-            # Send specific instructions to Claude to modify the file
-            clear_prompt = (
-                f"I need you to complete the code in the file '{file_path}' according to these requirements: {prompt}\n\n"
-                f"IMPORTANT: You MUST use the text-editor-tool to make these changes. Follow these steps:\n"
-                f"1. First view the current content with the 'view' command\n"
-                f"2. Analyze what changes are needed\n"
-                f"3. Use the appropriate commands like 'str_replace', 'insert', or 'create' to implement the changes\n"
-                f"4. After making changes, use 'view' again to confirm your changes were applied correctly\n"
-                f"5. Summarize the changes you made"
-            )
+            # Display an animated thinking indicator
+            thinking_styles = [
+                "[bold blue]Thinking...[/bold blue]",
+                "[bold green]Thinking...[/bold green]",
+                "[bold yellow]Thinking...[/bold yellow]",
+                "[bold magenta]Thinking...[/bold magenta]",
+                "[bold cyan]Thinking...[/bold cyan]"
+            ]
+            stop_thinking = asyncio.Event()
+            thinking_task = asyncio.create_task(self._animate_thinking(thinking_styles, stop_thinking))
             
-            await self.ask_claude(clear_prompt)
-            
+            try:
+                # Use direct API call to get a modified version of the file
+                request_prompt = f"""
+                Here is the current content of the file '{file_path}':
+                
+                ```
+                {original_content}
+                ```
+                
+                Please modify this file to meet these requirements: {prompt}
+                
+                Return ONLY the complete updated content of the file with your changes.
+                """
+                
+                response = await self.client.messages.create(
+                    model=self.model,
+                    messages=[MessageParam(role="user", content=request_prompt)],
+                    max_tokens=4000,
+                    stream=False
+                )
+                
+                stop_thinking.set()
+                await thinking_task
+                console.print("\r" + " " * 60 + "\r", end="")
+                
+                # Extract the modified content from Claude's response
+                new_content = ""
+                if hasattr(response, 'content'):
+                    for block in response.content:
+                        if hasattr(block, 'text'):
+                            new_content += block.text
+                
+                # Clean up the response to extract just the code
+                if "```" in new_content:
+                    # Extract code between the first and last backtick blocks
+                    start_idx = new_content.find("```")
+                    if start_idx != -1:
+                        start_idx = new_content.find("\n", start_idx) + 1
+                        end_idx = new_content.rfind("```")
+                        if end_idx > start_idx:
+                            new_content = new_content[start_idx:end_idx].strip()
+                
+                # Create and display the diff
+                diff_panel = await self.create_colored_diff(original_content, new_content, file_path)
+                console.print(diff_panel)
+                
+                # Ask the user to confirm the changes
+                console.print("[bold yellow]Apply these changes?[/bold yellow]")
+                confirm = input("[y]es/[n]o: ").strip().lower()
+                
+                if confirm in ['y', 'yes']:
+                    # Write the modified content to the file
+                    os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
+                    with open(resolved_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    
+                    console.print(f"[green]Successfully updated {file_path}[/green]")
+                else:
+                    console.print(f"[yellow]Changes to {file_path} were discarded[/yellow]")
+                    return
+                
+                # Update the context with the modified file if changes were applied
+                if confirm in ['y', 'yes']:
+                    for i, ctx in enumerate(self.context):
+                        if ctx.get('type') == 'file' and ctx.get('path') == file_path:
+                            old_tokens = ctx.get('tokens', 0)
+                            tokens_in_file = self.count_tokens(new_content)
+                            tokens_in_path = self.count_tokens(file_path)
+                            total_file_tokens = tokens_in_file + tokens_in_path
+                            self.context[i] = {
+                                'type': 'file',
+                                'path': file_path,
+                                'content': new_content,
+                                'tokens': total_file_tokens
+                            }
+                            self.current_tokens = self.current_tokens - old_tokens + total_file_tokens
+                            break
+                
+            except Exception as e:
+                stop_thinking.set()
+                await thinking_task
+                raise e
+                
         except Exception as e:
             console.print(f"[bold red]Error handling change request:[/bold red] {str(e)}")
 
