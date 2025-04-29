@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
+"""
+Claude Code Assistant CLI
+
+This module provides an interactive command-line assistant for coding, context management,
+and tool usage, powered by Anthropic Claude models.
+"""
 import argparse
 import asyncio
 import glob
 import os
-import re
 import sys
+import tempfile
+import difflib
 from typing import Optional, Tuple
 
 import anthropic
@@ -17,7 +24,6 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress
 from rich.syntax import Syntax
 
 # Initialize console for rich text display
@@ -213,7 +219,6 @@ class ClaudeSonnetCodeAssistant:
             await self.ask_claude(command)
 
     def show_help(self):
-        """Display help information."""
         help_text = """
         [bold]Available Commands:[/bold]
         
@@ -249,15 +254,8 @@ class ClaudeSonnetCodeAssistant:
         
         You can also type any message to directly chat with Claude.
         
-        [bold]Token Management:[/bold]
-        Token usage is displayed at the bottom right.
-        Files will be automatically summarized when total tokens exceed 180,000.
-
-        [bold]Diff Operations:[/bold]
-        When changing files, line numbers are shown and changes can be:
-        - Broken into multiple smaller segments for easier review
-        - Reviewed in an interactive VIM-like interface
-        - Applied selectively (accept/reject specific change segments)
+        [bold]File Editing:[/bold]
+        File changes are now handled automatically by Claude's text-editor-tool. You do not need to review or apply diffs manually. Claude will request file operations and they will be executed directly.
         """
         console.print(Panel(help_text, title="Claude Code Assistant Help"))
 
@@ -319,7 +317,7 @@ class ClaudeSonnetCodeAssistant:
     async def handle_listdir(self, dir_path: str):
         """List files and directories in the specified path."""
         try:
-            target_dir = self.resolve_path(dir_path)
+            target_dir = await self.resolve_path(dir_path)
             if os.path.isdir(target_dir):
                 items = os.listdir(target_dir)
 
@@ -355,352 +353,54 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[bold red]Error listing directory:[/bold red] {str(e)}")
 
     async def handle_generate(self, file_path: str, prompt: str):
-        try:
-            # Check if file already exists
-            full_path = self.resolve_path(file_path)
-            original_content = ""
-
-            if os.path.exists(full_path):
-                original_content = await self.read_file(full_path)
-                console.print(
-                    "[yellow]File already exists. Will generate a diff for changes.[/yellow]"
-                )
-
-            # Prepare prompt for Claude
-            file_ext = os.path.splitext(file_path)[1].lstrip(".")
-            messages = [
-                MessageParam(
-                    role="user",
-                    content=f"Generate code for a file named {file_path}. File type: {file_ext}.\n\nRequirements:\n{prompt}\n\nPlease provide only the code without any markdown formatting, explanations, or additional text.",
-                )
-            ]
-
-            # Get response from Claude
-            with Progress(transient=True) as progress:
-                task = progress.add_task("[cyan]Generating code...", total=None)
-
-                new_content = ""
-                stream = await self.client.messages.create(
-                    model=self.model,
-                    messages=messages,
-                    max_tokens=4000,
-                    stream=True,
-                )
-
-                async for chunk in stream:
-                    if chunk.delta.text:
-                        new_content += chunk.delta.text
-                        progress.update(task)
-
-            # Clean up any potential markdown code blocks
-            new_content = re.sub(r"```[\w]*\n", "", new_content)
-            new_content = new_content.replace("```", "")
-
-            # Determine if we need to show diffs (only if file already exists)
-            if original_content:
-                # Analyze and break down changes if needed
-                segments = await self.analyze_and_segment_changes(
-                    original_content, new_content, file_path
-                )
-
-                final_content = original_content
-                if len(segments) == 1:
-                    # Just one segment, show regular diff
-                    diff = await self.create_colored_diff(
-                        original_content, new_content, file_path, enhanced=True
-                    )
-                    console.print(diff)
-
-                    # Ask if they want to use interactive diff viewer
-                    use_interactive = (
-                        input(
-                            "Would you like to use the interactive diff viewer? (y/n): "
-                        )
-                        .strip()
-                        .lower()
-                        == "y"
-                    )
-
-                    if use_interactive:
-                        accepted, final_content = await self.interactive_diff_review(
-                            original_content, new_content, file_path
-                        )
-                    else:
-                        # Regular confirmation
-                        confirm = input("Apply these changes? (y/n): ").strip().lower()
-                        accepted = confirm == "y"
-                        final_content = new_content if accepted else original_content
-                else:
-                    # Multiple segments, review each one
-                    console.print(
-                        f"[yellow]Changes have been divided into {len(segments)} segments for easier review.[/yellow]"
-                    )
-
-                    # Start with the original content
-                    working_content = original_content
-
-                    # Process each segment
-                    for i, (segment_old, segment_new, segment_name) in enumerate(
-                        segments
-                    ):
-                        console.print(
-                            f"[bold]Segment {i+1}/{len(segments)}: {segment_name}[/bold]"
-                        )
-
-                        # Show diff for this segment
-                        segment_diff = await self.create_colored_diff(
-                            segment_old,
-                            segment_new,
-                            f"{file_path} (Segment {i+1})",
-                            enhanced=True,
-                        )
-                        console.print(segment_diff)
-
-                        # Ask for confirmation
-                        confirm = (
-                            input(f"Apply changes for segment {i+1}? (y/n): ")
-                            .strip()
-                            .lower()
-                        )
-                        if confirm == "y":
-                            # Apply this segment's changes
-                            working_content = working_content.replace(
-                                segment_old, segment_new
-                            )
-                            console.print(
-                                f"[green]Applied changes for segment {i+1}[/green]"
-                            )
-                        else:
-                            console.print(
-                                f"[yellow]Skipped changes for segment {i+1}[/yellow]"
-                            )
-
-                    final_content = working_content
-                    accepted = final_content != original_content
-            else:
-                # New file, just show the generated code
-                file_ext = os.path.splitext(file_path)[1].lstrip(".")
-                syntax = Syntax(new_content, file_ext, line_numbers=True)
-                console.print(Panel(syntax, title=f"Generated code for: {file_path}"))
-
-                # Ask for confirmation
-                confirm = input("Save this code? (y/n): ").strip().lower()
-                accepted = confirm == "y"
-                final_content = new_content if accepted else ""
-
-            # If accepted and has content, save the file
-            if accepted and final_content:
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(os.path.abspath(full_path)), exist_ok=True)
-
-                # Write the file
-                with open(full_path, "w") as f:
-                    f.write(final_content)
-                console.print(f"[green]Saved code to {full_path}[/green]")
-
-                # Count tokens for new file
-                tokens_in_file = self.count_tokens(final_content)
-                tokens_in_path = self.count_tokens(file_path)
-                total_file_tokens = tokens_in_file + tokens_in_path
-
-                # Add to context
-                self.context.append(
-                    {
-                        "type": "file",
-                        "path": file_path,
-                        "content": final_content,
-                        "tokens": total_file_tokens,
-                    }
-                )
-                self.current_tokens += total_file_tokens
-            else:
-                console.print("[yellow]Code generation cancelled[/yellow]")
-
-        except Exception as e:
-            console.print(f"[bold red]Error generating code:[/bold red] {str(e)}")
+        """Request Claude to generate code for a file using the text-editor-tool."""
+        # Just prompt Claude; let it use the tool-use protocol for file creation/edits
+        await self.ask_claude(f"Please generate code for the file '{file_path}' with the following requirements: {prompt}. Use the text-editor-tool to create or edit the file as needed.")
 
     async def handle_change(self, file_path: str, prompt: str):
+        """Request Claude to change a file using the text-editor-tool."""
         try:
-            # Read the existing file
-            full_path = await self.resolve_path(file_path)
-            if not os.path.exists(full_path):
-                console.print(f"[bold red]File does not exist:[/bold red] {full_path}")
+            # First, ensure the file is in context by loading it
+            resolved_path = await self.resolve_path(file_path)
+            if not os.path.exists(resolved_path):
+                console.print(f"[bold red]File does not exist:[/bold red] {resolved_path}")
                 return
-
-            original_content = await self.read_file(full_path)
-
-            # Calculate tokens to remove from context if file is already there
-            old_tokens = 0
-            for i, ctx in enumerate(self.context):
+            
+            # Read the file content
+            file_content = await self.read_file(resolved_path)
+            if not file_content:
+                console.print(f"[bold red]Could not read file:[/bold red] {resolved_path}")
+                return
+                
+            # Add to context if not already there
+            file_in_context = False
+            for ctx in self.context:
                 if ctx.get("type") == "file" and ctx.get("path") == file_path:
-                    old_tokens = ctx.get("tokens", 0)
+                    file_in_context = True
                     break
-
-            # Prepare context for Claude
-            file_ext = os.path.splitext(file_path)[1].lstrip(".")
-            messages = [
-                MessageParam(
-                    role="user",
-                    content=f"Here's the content of {file_path}:\n\n```{file_ext}\n{original_content}\n```\n\nPlease modify this code according to the following request:\n{prompt}\n\nProvide ONLY the complete updated code without any markdown formatting, explanations, or additional text.",
-                )
-            ]
-
-            # Get response from Claude
-            with Progress(transient=True) as progress:
-                task = progress.add_task("[cyan]Modifying code...", total=None)
-
-                new_content = ""
-                stream = await self.client.messages.create(
-                    model=self.model,
-                    messages=messages,
-                    max_tokens=4000,
-                    stream=True,
-                )
-
-                # Process different types of events from the stream
-                async for event in stream:
-                    if hasattr(event, "delta") and hasattr(event.delta, "text"):
-                        # Handle ContentBlockDeltaEvent
-                        if event.delta.text:
-                            new_content += event.delta.text
-                            progress.update(task)
-                    elif hasattr(event, "type") and event.type == "content_block_delta":
-                        # Alternative way to handle content block delta
-                        if hasattr(event, "delta") and hasattr(event.delta, "text"):
-                            new_content += event.delta.text
-                            progress.update(task)
-                    elif hasattr(event, "content_block") and hasattr(
-                        event.content_block, "text"
-                    ):
-                        # Handle ContentBlockStartEvent
-                        new_content += event.content_block.text
-                        progress.update(task)
-
-            # Clean up any potential markdown code blocks
-            new_content = re.sub(r"```[\w]*\n", "", new_content)
-            new_content = new_content.replace("```", "")
-
-            # Analyze and break down changes if needed
-            segments = await self.analyze_and_segment_changes(
-                original_content, new_content, file_path
-            )
-
-            final_content = original_content
-            if len(segments) == 1:
-                # Just one segment, show regular diff
-                diff = await self.create_colored_diff(
-                    original_content, new_content, file_path, enhanced=True
-                )
-                console.print(diff)
-
-                # Automatically use the interactive diff viewer if always_use_vim_style is enabled
-                if self.always_use_vim_style:
-                    console.print(
-                        "[cyan]Using VIM-style interactive diff reviewer for incremental patches...[/cyan]"
-                    )
-                    accepted, final_content = await self.interactive_diff_review(
-                        original_content, new_content, file_path
-                    )
-                else:
-                    # Ask if they want to use interactive diff viewer
-                    use_interactive = (
-                        input(
-                            "Would you like to use the interactive diff viewer? (y/n): "
-                        )
-                        .strip()
-                        .lower()
-                        == "y"
-                    )
-                    if use_interactive:
-                        accepted, final_content = await self.interactive_diff_review(
-                            original_content, new_content, file_path
-                        )
-                    else:
-                        # Regular confirmation
-                        confirm = input("Apply these changes? (y/n): ").strip().lower()
-                        accepted = confirm == "y"
-                        final_content = new_content if accepted else original_content
-            else:
-                # Multiple segments, review each one
-                console.print(
-                    f"[yellow]Changes have been divided into {len(segments)} segments for easier review.[/yellow]"
-                )
-
-                # Start with the original content
-                working_content = original_content
-
-                # Process each segment
-                for i, (segment_old, segment_new, segment_name) in enumerate(segments):
-                    console.print(
-                        f"[bold]Segment {i+1}/{len(segments)}: {segment_name}[/bold]"
-                    )
-
-                    # Show diff for this segment
-                    segment_diff = await self.create_colored_diff(
-                        segment_old,
-                        segment_new,
-                        f"{file_path} (Segment {i+1})",
-                        enhanced=True,
-                    )
-                    console.print(segment_diff)
-
-                    # Ask for confirmation
-                    confirm = (
-                        input(f"Apply changes for segment {i+1}? (y/n): ")
-                        .strip()
-                        .lower()
-                    )
-                    if confirm == "y":
-                        # Apply this segment's changes
-                        working_content = working_content.replace(
-                            segment_old, segment_new
-                        )
-                        console.print(
-                            f"[green]Applied changes for segment {i+1}[/green]"
-                        )
-                    else:
-                        console.print(
-                            f"[yellow]Skipped changes for segment {i+1}[/yellow]"
-                        )
-
-                final_content = working_content
-                accepted = final_content != original_content
-
-            # If changes were accepted, save the file
-            if accepted:
-                with open(full_path, "w") as f:
-                    f.write(final_content)
-                console.print(f"[green]Updated {full_path}[/green]")
-
-                # Count tokens for updated file
-                tokens_in_file = self.count_tokens(final_content)
+                    
+            if not file_in_context:
+                tokens_in_file = self.count_tokens(file_content)
                 tokens_in_path = self.count_tokens(file_path)
                 total_file_tokens = tokens_in_file + tokens_in_path
-
-                # Update context
-                for i, ctx in enumerate(self.context):
-                    if ctx.get("type") == "file" and ctx.get("path") == file_path:
-                        self.current_tokens -= old_tokens
-                        self.context[i]["content"] = final_content
-                        self.context[i]["tokens"] = total_file_tokens
-                        self.current_tokens += total_file_tokens
-                        break
-                else:
-                    # File wasn't in context before
-                    self.context.append(
-                        {
-                            "type": "file",
-                            "path": file_path,
-                            "content": final_content,
-                            "tokens": total_file_tokens,
-                        }
-                    )
-                    self.current_tokens += total_file_tokens
-            else:
-                console.print("[yellow]Code changes cancelled[/yellow]")
-
+                self.context.append({
+                    "type": "file",
+                    "path": file_path,
+                    "content": file_content,
+                    "tokens": total_file_tokens,
+                })
+                self.current_tokens += total_file_tokens
+                console.print(f"[green]Added {file_path} to context[/green]")
+            
+            # Send specific instructions to Claude to modify the file
+            await self.ask_claude(
+                f"I need you to modify the file '{file_path}' according to these requirements: {prompt}\n\n"
+                f"IMPORTANT: Use the text-editor-tool to make these changes. First view the current content "
+                f"with the 'view' command, then use appropriate commands like 'str_replace' or 'insert' to "
+                f"implement the changes."
+            )
         except Exception as e:
-            console.print(f"[bold red]Error modifying code:[/bold red] {str(e)}")
+            console.print(f"[bold red]Error handling change request:[/bold red] {str(e)}")
 
     async def handle_search(self, query: str):
         """Search for files or code."""
@@ -749,7 +449,11 @@ class ClaudeSonnetCodeAssistant:
             if stderr:
                 stderr_str = stderr.decode()
                 console.print(
-                    Panel(stderr_str, title="Standard Error", border_style="red")
+                    Panel(
+                        stderr_str,
+                        title="Standard Error",
+                        border_style="red"
+                    )
                 )
 
             console.print(f"[dim]Command exited with code {process.returncode}[/dim]")
@@ -760,7 +464,7 @@ class ClaudeSonnetCodeAssistant:
             )
 
     async def ask_claude(self, prompt: str):
-        """Send a direct prompt to Claude."""
+        """Send a direct prompt to Claude, handling tool_use blocks for the text-editor-tool."""
         try:
             # Prepare context based on loaded files
             context_str = ""
@@ -777,138 +481,207 @@ class ClaudeSonnetCodeAssistant:
             )
 
             # Display an animated thinking indicator
-            thinking_styles = [
-                "[bold blue]Thinking...[/bold blue]",
-                "[bold green]Thinking...[/bold green]",
-                "[bold yellow]Thinking...[/bold yellow]",
-                "[bold magenta]Thinking...[/bold magenta]",
-                "[bold cyan]Thinking...[/bold cyan]",
-            ]
-
-            # Create and start the thinking animation task
+            thinking_styles = ["[bold blue]Thinking...[/bold blue]", 
+                            "[bold green]Thinking...[/bold green]", 
+                            "[bold yellow]Thinking...[/bold yellow]", 
+                            "[bold magenta]Thinking...[/bold magenta]", 
+                            "[bold cyan]Thinking...[/bold cyan]"]
             stop_thinking = asyncio.Event()
-            thinking_task = asyncio.create_task(
-                self._animate_thinking(thinking_styles, stop_thinking)
-            )
-
+            thinking_task = asyncio.create_task(self._animate_thinking(thinking_styles, stop_thinking))
             try:
-                # Send to Claude
                 response_text = ""
                 stream = await self.client.messages.create(
                     model=self.model,
                     messages=[MessageParam(role="user", content=full_prompt)],
                     max_tokens=4000,
                     stream=True,
+                    tools=[{
+                        "name": "text-editor-tool",
+                        "description": "A tool for viewing and editing files on disk.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "command": {"type": "string"},
+                                "path": {"type": "string"},
+                                "text": {"type": "string"},
+                                "find": {"type": "string"},
+                                "replace": {"type": "string"},
+                                "line": {"type": "integer"},
+                                "col": {"type": "integer"},
+                                "backup_path": {"type": "string"},
+                                "with_line_numbers": {"type": "boolean"}
+                            },
+                            "required": ["command", "path"]
+                        }
+                    }]
                 )
-
-                # Stop thinking animation and clear the line
                 stop_thinking.set()
                 await thinking_task
                 console.print("\r" + " " * 60 + "\r", end="")
-
-                # Print "Assistant:" label in red before starting the response
                 console.print("\n[bold red]Assistant:[/bold red] ", end="")
-
-                # Stream the response token by token with a small delay
+                # Track the current message for continuation
+                message_id = None
+                
                 async for event in stream:
-                    if hasattr(event, "delta") and hasattr(event.delta, "text"):
-                        # Process ContentBlockDeltaEvent
+                    # Capture message ID for continuation
+                    if hasattr(event, 'message') and not message_id:
+                        message_id = event.message.id
+                    
+                    # Tool use block handling
+                    if hasattr(event, 'type') and event.type == 'tool_use':
+                        console.print(f"\n[dim]Using text-editor-tool: {event.name}[/dim]")
+                        tool_result = await self.handle_editor_tool(event)
+                        console.print(f"[dim]Tool result: {tool_result.split(os.linesep)[0]}...[/dim]")
+                        
+                        # Send tool result back to continue the conversation
+                        # Send tool result back to continue the conversation
+                        # Send tool result back to continue the conversation
+                        continued_response = await self.client.messages.create(
+                            model=self.model,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": full_prompt},
+                                        {"type": "tool_result", "tool_use_id": event.id, "content": tool_result}
+                                    ]
+                                }
+                            ],
+                            max_tokens=4000,
+                            stream=True
+                        )
+                        
+                        # Process the continued conversation
+                        async for cont_event in continued_response:
+                            # Handle text chunks from continued conversation
+                            if hasattr(cont_event, 'delta') and hasattr(cont_event.delta, 'text'):
+                                chunk = cont_event.delta.text
+                                if chunk:
+                                    response_text += chunk
+                                    console.print(chunk, end="", highlight=False)
+                                    sys.stdout.flush()
+                                    await asyncio.sleep(0.01)
+                            elif hasattr(cont_event, 'content_block') and hasattr(cont_event.content_block, 'text'):
+                                chunk = cont_event.content_block.text
+                                if chunk:
+                                    response_text += chunk
+                                    console.print(chunk, end="", highlight=False)
+                                    sys.stdout.flush()
+                                    await asyncio.sleep(0.01)
+                            # Handle potential nested tool use
+                            elif hasattr(cont_event, 'type') and cont_event.type == 'tool_use':
+                                # Handle nested tool use (recursion limited to one level for simplicity)
+                                nested_result = await self.handle_editor_tool(cont_event)
+                                # Handle nested tool use
+                                await self.client.messages.create(
+                                    model=self.model,
+                                    messages=[
+                                        {
+                                            "role": "user",
+                                            "content": [
+                                                {"type": "text", "text": full_prompt},
+                                                {"type": "tool_result", "tool_use_id": cont_event.id, "content": nested_result}
+                                            ]
+                                        }
+                                    ],
+                                    max_tokens=4000,
+                                    stream=False
+                                )
+
+                    # Text streaming
+                    elif hasattr(event, 'delta') and hasattr(event.delta, 'text'):
                         chunk = event.delta.text
                         if chunk:
                             response_text += chunk
                             console.print(chunk, end="", highlight=False)
-                            # Force flush to ensure immediate display
                             sys.stdout.flush()
-                            # Add a small delay between tokens for better readability
                             await asyncio.sleep(0.01)
-                    elif hasattr(event, "type") and event.type == "content_block_delta":
-                        # Alternative way to handle content block delta
-                        if hasattr(event, "delta") and hasattr(event.delta, "text"):
-                            chunk = event.delta.text
-                            if chunk:
-                                response_text += chunk
-                                console.print(chunk, end="", highlight=False)
-                                sys.stdout.flush()
-                                # Add a small delay between tokens for better readability
-                                await asyncio.sleep(0.01)
-                    elif hasattr(event, "content_block") and hasattr(
-                        event.content_block, "text"
-                    ):
-                        # Handle ContentBlockStartEvent
+                    elif hasattr(event, 'content_block') and hasattr(event.content_block, 'text'):
                         chunk = event.content_block.text
                         if chunk:
                             response_text += chunk
                             console.print(chunk, end="", highlight=False)
                             sys.stdout.flush()
-                            # Add a small delay between tokens for better readability
                             await asyncio.sleep(0.01)
-
                 console.print()  # newline after response
-
             except Exception as e:
-                # Make sure to stop the thinking animation if there's an error
                 stop_thinking.set()
                 await thinking_task
                 raise e
-
         except anthropic.APIStatusError as e:
-            # Handle API-specific errors
             error_message = str(e)
             if "overloaded_error" in error_message:
-                console.print(
-                    "\r[bold red]Error: Claude API is currently overloaded. Please try again in a few moments.[/bold red]"
-                )
+                console.print("\r[bold red]Error: Claude API is currently overloaded. Please try again in a few moments.[/bold red]")
             else:
-                console.print(
-                    f"\r[bold red]API Error communicating with Claude:[/bold red] {str(e)}"
-                )
+                console.print(f"\r[bold red]API Error communicating with Claude:[/bold red] {str(e)}")
         except Exception as e:
-            console.print(
-                f"\r[bold red]Error communicating with Claude:[/bold red] {str(e)}"
-            )
+            console.print(f"\r[bold red]Error communicating with Claude:[/bold red] {str(e)}")
 
-    async def _animate_thinking(self, styles, stop_event):
-        """Display an animated thinking indicator like KITT from Knight Rider until stop_event is set."""
-        # Clear any previous output and ensure we're on a fresh line
-        console.print("\r", end="")
-
-        # Use purple and orange colors for the beam
-        colors = ["[bold purple]", "[bold #FF8C00]"]  # Purple and orange (dark orange)
-
-        position = 0
-        direction = 1  # 1 for moving right, -1 for moving left
-        max_position = 25  # Maximum width of the animation
-        dots = "●" * 3  # The beam size (3 dots)
-
-        while not stop_event.is_set():
-            # Create the spaces before and after the beam
-            spaces_before = " " * position
-            spaces_after = " " * (max_position - position - len(dots))
-
-            # Alternate between purple and orange
-            color = colors[int(position / 2) % len(colors)]
-
-            # Build the complete animation string on a single line
-            animation_text = (
-                f"\r{color}Thinking... {spaces_before}{dots}{spaces_after}[/]"
-            )
-
-            # Print without newline and flush
-            console.print(animation_text, end="")
-            sys.stdout.flush()
-
-            # Update position for next iteration
-            position += direction
-
-            # Change direction when hitting the edges
-            if position > max_position - len(dots) or position < 0:
-                direction *= -1
-
-            # Control speed
-            await asyncio.sleep(0.09)
-
-        # Clear the thinking indicator line when done
-        console.print("\r" + " " * (max_position + 20) + "\r", end="")
+    async def handle_editor_tool(self, tool_call):
+        """Implements the Anthropic text-editor-tool commands."""
+        try:
+            params = tool_call.input if hasattr(tool_call, 'input') else tool_call.get('input', {})
+            command = params.get('command')
+            path = params.get('path')
+            if not path:
+                return "Error: No file path provided."
+            abs_path = await self.resolve_path(path)
+            if command == 'view':
+                with_line_numbers = params.get('with_line_numbers', False)
+                if not os.path.exists(abs_path):
+                    return f"Error: File {abs_path} does not exist."
+                with open(abs_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                if with_line_numbers:
+                    return ''.join(f"{i+1}: {line}" for i, line in enumerate(lines))
+                return ''.join(lines)
+            elif command == 'str_replace':
+                find = params.get('find', '')
+                replace = params.get('replace', '')
+                if not os.path.exists(abs_path):
+                    return f"Error: File {abs_path} does not exist."
+                with open(abs_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                new_content = content.replace(find, replace)
+                with open(abs_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                return f"Replaced all occurrences of '{find}' with '{replace}' in {abs_path}."
+            elif command == 'create':
+                text = params.get('text', '')
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                return f"Created file {abs_path}."
+            elif command == 'insert':
+                text = params.get('text', '')
+                line = params.get('line', 1)
+                col = params.get('col', 0)
+                if not os.path.exists(abs_path):
+                    return f"Error: File {abs_path} does not exist."
+                with open(abs_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                # Insert at line/col
+                if line > len(lines):
+                    lines.append(text + '\n')
+                else:
+                    orig_line = lines[line-1]
+                    lines[line-1] = orig_line[:col] + text + orig_line[col:]
+                with open(abs_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+                return f"Inserted text at line {line}, col {col} in {abs_path}."
+            elif command == 'undo_edit':
+                backup_path = params.get('backup_path')
+                if not backup_path:
+                    return f"Error: Backup file {backup_path} does not exist."
+                backup_path_resolved = await self.resolve_path(backup_path)
+                if not os.path.exists(backup_path_resolved):
+                    return f"Error: Backup file {backup_path} does not exist."
+                with open(backup_path_resolved, 'r', encoding='utf-8') as src, open(abs_path, 'w', encoding='utf-8') as dst:
+                    dst.write(src.read())
+                return f"Restored {abs_path} from backup {backup_path}."
+            return f"Error: Unknown command '{command}'."
+        except Exception as e:
+            return f"Error in text-editor-tool: {str(e)}"
 
     async def auto_summarize(self):
         console.print(
@@ -1062,12 +835,10 @@ class ClaudeSonnetCodeAssistant:
 
     async def create_colored_diff(
         self, original: str, new: str, file_path: str, enhanced: bool = True
-    ) -> str:
+    ) -> Panel:
         """Create a colored unified diff with explicit line numbers."""
         try:
             # Create temporary files for diffing
-            import os
-            import tempfile
 
             with tempfile.NamedTemporaryFile(mode="w", delete=False) as old_file:
                 old_file.write(original)
@@ -1188,7 +959,7 @@ class ClaudeSonnetCodeAssistant:
                 os.unlink(new_file_path)
 
         except Exception as e:
-            return f"[bold red]Error creating diff:[/bold red] {str(e)}"
+            return Panel(f"[bold red]Error creating diff:[/bold red] {str(e)}", title=f"Diff Error for {file_path}", border_style="red")
 
     async def interactive_diff_review(
         self, original: str, new: str, file_path: str
@@ -1219,7 +990,6 @@ class ClaudeSonnetCodeAssistant:
             new_lines = new.splitlines()
 
             # Use difflib to get line-by-line diff
-            import difflib
 
             differ = difflib.Differ()
             diff_lines = list(differ.compare(old_lines, new_lines))
@@ -1256,7 +1026,6 @@ class ClaudeSonnetCodeAssistant:
                 return False, original
 
             # Review each chunk
-            working_content = original
             current_chunk_idx = 0
 
             while current_chunk_idx < len(chunks):
@@ -1313,7 +1082,9 @@ class ClaudeSonnetCodeAssistant:
     ) -> Tuple[bool, str]:
         """Fall back to simple confirmation if interactive mode fails."""
         confirm = input("Apply these changes? (y/n): ").strip().lower()
-        return confirm == "y", new if confirm == "y" else original
+        if confirm == "y":
+            return True, new
+        return False, original
 
     async def analyze_and_segment_changes(
         self, original: str, new: str, file_path: str
@@ -1324,10 +1095,8 @@ class ClaudeSonnetCodeAssistant:
         new_lines = new.splitlines()
 
         # Use difflib to find unified diff
-        import difflib
 
         diff = list(difflib.unified_diff(old_lines, new_lines, n=3))
-        diff_text = "\n".join(diff)
 
         # Calculate change size
         plus_lines = len([line for line in diff if line.startswith("+")])
@@ -1444,6 +1213,28 @@ class ClaudeSonnetCodeAssistant:
         if os.path.isabs(path):
             return path
         return os.path.abspath(os.path.join(self.current_dir, path))
+
+    async def _animate_thinking(self, styles, stop_event):
+        """Display an animated thinking indicator like KITT from Knight Rider until stop_event is set."""
+        # Use purple and orange colors for the beam
+        colors = ["[bold magenta]", "[bold #FF8C00]"]  # Purple and orange
+        position = 0
+        direction = 1  # 1 for moving right, -1 for moving left
+        max_position = 20  # Width of the animation
+        dots = "●" * 3  # The beam size (3 dots)
+        while not stop_event.is_set():
+            spaces_before = " " * position
+            spaces_after = " " * (max_position - position - len(dots))
+            color = colors[(position // 2) % len(colors)]
+            animation_text = f"\r{color}Thinking... {spaces_before}{dots}{spaces_after}[/]"
+            console.print(animation_text, end="")
+            sys.stdout.flush()
+            position += direction
+            if position > max_position - len(dots) or position < 0:
+                direction *= -1
+            await asyncio.sleep(0.09)
+        # Clear the thinking indicator line when done
+        console.print("\r" + " " * (max_position + 30) + "\r", end="")
 
 
 # Add the main entry point so the program can start
