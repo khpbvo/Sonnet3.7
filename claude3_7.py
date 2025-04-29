@@ -62,7 +62,7 @@ class ClaudeSonnetCodeAssistant:
             "cl100k_base"
         )  # Use get_encoding for encoding names
         self.max_tokens = 180000  # Max token threshold for auto-summarization
-        self.current_tokens = 0  # Current token count
+        self.current_tokens = 0  # Current token coun
 
         # Diff settings
         self.max_diff_size = (
@@ -127,7 +127,7 @@ class ClaudeSonnetCodeAssistant:
 
         while True:
             try:
-                # Get user input
+                # Get user inpu
                 user_input = await self.session.prompt_async(
                     f"[{os.path.basename(self.current_dir)}] > "
                 )
@@ -201,7 +201,7 @@ class ClaudeSonnetCodeAssistant:
                         "[bold red]Invalid format. Use code:generate:file.py:prompt[/bold red]"
                     )
             elif cmd_type == "change" and len(parts) > 2:
-                # Improved: allow colons in prompt
+                # Improved: allow colons in promp
                 first_colon = parts[2].find(":")
                 if first_colon != -1:
                     file_path = parts[2][:first_colon]
@@ -224,39 +224,39 @@ class ClaudeSonnetCodeAssistant:
     def show_help(self):
         help_text = """
         [bold]Available Commands:[/bold]
-        
+
         [bold green]code:read:path/to/file[/bold green]
             Load a file as context for Claude
-        
+
         [bold green]code:read:files:file1,file2,file3[/bold green]
             Load multiple files as context for Claude
-        
+
         [bold green]code:changedir:/path/to/dir[/bold green]
             Change the current working directory
-        
+
         [bold green]code:listdir:/path/to/dir[/bold green]
             List all files and directories in the specified path
-        
+
         [bold green]code:generate:file.py:prompt[/bold green]
-            Generate new code in the specified file based on the prompt
-        
+            Generate new code in the specified file based on the promp
+
         [bold green]code:change:file.py:prompt[/bold green]
-            Make changes to an existing file based on the prompt
-        
+            Make changes to an existing file based on the promp
+
         [bold green]code:search:pattern[/bold green]
             Search for files or code containing the pattern
-        
+
         [bold green]code:shell:command[/bold green]
             Execute a shell command
-        
+
         [bold green]help[/bold green]
             Show this help message
-        
+
         [bold green]exit[/bold green] or [bold green]quit[/bold green]
             Exit the program
-        
+
         You can also type any message to directly chat with Claude.
-        
+
         [bold]File Editing:[/bold]
         File changes are now handled automatically by Claude's text-editor-tool. You do not need to review or apply diffs manually. Claude will request file operations and they will be executed directly.
         """
@@ -297,8 +297,10 @@ class ClaudeSonnetCodeAssistant:
                 )
                 console.print(f"[green]Added {file_path} to context[/green]")
                 self.current_tokens += total_file_tokens
-        except Exception as e:
+        except (FileNotFoundError, OSError, UnicodeDecodeError) as e:
             console.print(f"[bold red]Error reading file:[/bold red] {str(e)}")
+        except Exception as e:
+            console.print(f"[bold red]Unknown error reading file:[/bold red] {str(e)}")
 
     async def handle_changedir(self, dir_path: str):
         """Change current working directory."""
@@ -362,7 +364,7 @@ class ClaudeSonnetCodeAssistant:
 
     async def _handle_change_deprecated(self, file_path: str, prompt: str):
         """Deprecated implementation - kept for reference."""
-        pass
+        # No implementation (deprecated)
 
     async def handle_editor_tool(self, tool_call):
         """Implements the Anthropic text_editor_20250124 commands."""
@@ -381,7 +383,7 @@ class ClaudeSonnetCodeAssistant:
             abs_path = await self.resolve_path(path)
 
             # The rest of your handler implementation should work fine for the commands
-            # view, str_replace, create, insert, append, undo_edit
+            # view, str_replace, create, insert, append, undo_edi
 
             if command == 'view':
                 with_line_numbers = params.get('with_line_numbers', False)
@@ -412,7 +414,7 @@ class ClaudeSonnetCodeAssistant:
                     return f"Error: File {abs_path} does not exist."
 
                 try:
-                    # Read the current content
+                    # Read the current conten
                     with open(abs_path, 'r', encoding='utf-8') as f:
                         content = f.read()
 
@@ -423,7 +425,7 @@ class ClaudeSonnetCodeAssistant:
                     with open(backup_path, 'w', encoding='utf-8') as f:
                         f.write(content)
 
-                    # Replace and write the new content
+                    # Replace and write the new conten
                     new_content = content.replace(find, replace)
                     with open(abs_path, 'w', encoding='utf-8') as f:
                         f.write(new_content)
@@ -438,7 +440,7 @@ class ClaudeSonnetCodeAssistant:
                 text = params.get('text', '')
 
                 try:
-                    # Create directories if they don't exist
+                    # Create directories if they don't exis
                     dir_path = os.path.dirname(abs_path)
                     if dir_path:
                         os.makedirs(dir_path, exist_ok=True)
@@ -460,7 +462,7 @@ class ClaudeSonnetCodeAssistant:
                     return f"Error: File {abs_path} does not exist."
 
                 try:
-                    # Read the current content
+                    # Read the current conten
                     with open(abs_path, 'r', encoding='utf-8') as f:
                         lines = f.readlines()
 
@@ -490,10 +492,10 @@ class ClaudeSonnetCodeAssistant:
                         # Ensure the column is valid
                         col = max(0, min(col, len(orig_line)))
 
-                        # Insert text
+                        # Insert tex
                         lines[line_idx] = orig_line[:col] + text + orig_line[col:]
 
-                    # Write the modified content
+                    # Write the modified conten
                     with open(abs_path, 'w', encoding='utf-8') as f:
                         f.writelines(lines)
 
@@ -541,7 +543,7 @@ class ClaudeSonnetCodeAssistant:
                     with open(backup_path, 'w', encoding='utf-8') as f:
                         f.write(content)
 
-                    # Append the text
+                    # Append the tex
                     with open(abs_path, 'a', encoding='utf-8') as f:
                         f.write(text)
 
@@ -559,7 +561,7 @@ class ClaudeSonnetCodeAssistant:
         """
         The function contains methods for handling search, shell commands, interacting with a
         text-editor-tool, file changes, generating summaries, and creating colored diffs.
-        
+
         :param query: The `query` parameter in the `handle_search` method is used to search for files or
         code based on the input provided. The method splits the query into a search type and search query,
         then performs the search based on the type specified (either "file" or "code"). If no type
@@ -599,9 +601,9 @@ class ClaudeSonnetCodeAssistant:
                 cwd=self.current_dir,
             )
 
-            stdout, stderr = await process.communicate()
+            stdout, _ = await process.communicate()
 
-            # Display output
+            # Display outpu
             if stdout:
                 stdout_str = stdout.decode()
                 console.print(
@@ -616,9 +618,13 @@ class ClaudeSonnetCodeAssistant:
 
             console.print(f"[dim]Command exited with code {process.returncode}[/dim]")
 
+        except OSError as oe:
+            console.print(
+                f"[bold red]Shell command OS error:[/bold red] {str(oe)}"
+            )
         except Exception as e:
             console.print(
-                f"[bold red]Error executing shell command:[/bold red] {str(e)}"
+                f"[bold red]Unknown error executing shell command:[/bold red] {str(e)}"
             )
 
     async def ask_claude(self, prompt: str):
@@ -633,23 +639,16 @@ class ClaudeSonnetCodeAssistant:
                     ext = os.path.splitext(path)[1].lstrip(".")
                     context_str += f"File: {path}\n```{ext}\n{content}\n```\n\n"
 
-            # Create the full prompt
+            # Create the full promp
             full_prompt = (
                 f"{context_str}Working directory: {self.current_dir}\n\n{prompt}"
             )
             # Display an animated thinking indicator
-            thinking_styles = [
-                "[bold blue]Thinking...[/bold blue]",
-                "[bold green]Thinking...[/bold green]",
-                "[bold yellow]Thinking...[/bold yellow]",
-                "[bold magenta]Thinking...[/bold magenta]",
-                "[bold cyan]Thinking...[/bold cyan]"
-            ]
             stop_thinking = asyncio.Event()
-            thinking_task = asyncio.create_task(self._animate_thinking(thinking_styles, stop_thinking))
-            
+            thinking_task = asyncio.create_task(self._animate_thinking(stop_thinking))
+
             modified_files = set()
-            
+
             # Use the proper tool name according to Anthropic docs: "text_editor_20250124"
             response = await self.client.messages.create(
                 model=self.model,
@@ -676,15 +675,16 @@ class ClaudeSonnetCodeAssistant:
                     }
                 }]
             )
-            
+
             stop_thinking.set()
             await thinking_task
             console.print("\r" + " " * 60 + "\r", end="")
             console.print("\n[bold red]Assistant:[/bold red] ", end="")
-            
+
             full_response = ""
-            
+
             # Handle any tool uses
+            follow = None  # Ensure the variable always exists for later access
             if hasattr(response, 'tool_uses') and response.tool_uses:
                 for tool_use in response.tool_uses:
                     if tool_use.name == "text_editor_20250124":
@@ -744,6 +744,7 @@ class ClaudeSonnetCodeAssistant:
                                         max_tokens=4000,
                                         stream=False
                                     )
+            if follow is not None:
                 for block in getattr(follow, 'content', []):
                     txt = getattr(block, 'text', None)
                     if txt:
@@ -757,7 +758,7 @@ class ClaudeSonnetCodeAssistant:
                         full_response += txt
                         console.print(txt, highlight=False)
             console.print()
-            # update context
+            # update contex
             if modified_files:
                 console.print("[yellow]Updating context with modified files...[/yellow]")
                 for fpath in modified_files:
@@ -784,25 +785,25 @@ class ClaudeSonnetCodeAssistant:
     async def handle_change(self, file_path: str, prompt: str):
         """Generate a diff and modify a file based on the prompt."""
         try:
-            # First, ensure the file exists and read its content
+            # First, ensure the file exists and read its conten
             resolved_path = await self.resolve_path(file_path)
             if not os.path.exists(resolved_path):
                 console.print(f"[bold red]File does not exist:[/bold red] {resolved_path}")
                 return
-            
-            # Read the file content
+
+            # Read the file conten
             original_content = await self.read_file(resolved_path)
             if not original_content:
                 console.print(f"[bold red]Could not read file:[/bold red] {resolved_path}")
                 return
-                
+
             # Add to context if not already there
             file_in_context = False
             for ctx in self.context:
                 if ctx.get("type") == "file" and ctx.get("path") == file_path:
                     file_in_context = True
                     break
-                    
+
             if not file_in_context:
                 tokens_in_file = self.count_tokens(original_content)
                 tokens_in_path = self.count_tokens(file_path)
@@ -815,7 +816,7 @@ class ClaudeSonnetCodeAssistant:
                 })
                 self.current_tokens += total_file_tokens
                 console.print(f"[green]Added {file_path} to context[/green]")
-            
+
             # Display an animated thinking indicator
             thinking_styles = [
                 "[bold blue]Thinking...[/bold blue]",
@@ -826,39 +827,39 @@ class ClaudeSonnetCodeAssistant:
             ]
             stop_thinking = asyncio.Event()
             thinking_task = asyncio.create_task(self._animate_thinking(thinking_styles, stop_thinking))
-            
+
             try:
                 # Use direct API call to get a modified version of the file
                 request_prompt = f"""
                 Here is the current content of the file '{file_path}':
-                
+
                 ```
                 {original_content}
                 ```
-                
+
                 Please modify this file to meet these requirements: {prompt}
-                
+
                 Return ONLY the complete updated content of the file with your changes.
                 """
-                
+
                 response = await self.client.messages.create(
                     model=self.model,
                     messages=[MessageParam(role="user", content=request_prompt)],
                     max_tokens=4000,
                     stream=False
                 )
-                
+
                 stop_thinking.set()
                 await thinking_task
                 console.print("\r" + " " * 60 + "\r", end="")
-                
+
                 # Extract the modified content from Claude's response
                 new_content = ""
                 if hasattr(response, 'content'):
                     for block in response.content:
                         if hasattr(block, 'text'):
-                            new_content += block.text
-                
+                            new_content += block.tex
+
                 # Clean up the response to extract just the code
                 if "```" in new_content:
                     # Extract code between the first and last backtick blocks
@@ -868,26 +869,26 @@ class ClaudeSonnetCodeAssistant:
                         end_idx = new_content.rfind("```")
                         if end_idx > start_idx:
                             new_content = new_content[start_idx:end_idx].strip()
-                
+
                 # Create and display the diff
                 diff_panel = await self.create_colored_diff(original_content, new_content, file_path)
                 console.print(diff_panel)
-                
+
                 # Ask the user to confirm the changes
                 console.print("[bold yellow]Apply these changes?[/bold yellow]")
                 confirm = input("[y]es/[n]o: ").strip().lower()
-                
+
                 if confirm in ['y', 'yes']:
                     # Write the modified content to the file
                     os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
                     with open(resolved_path, 'w', encoding='utf-8') as f:
                         f.write(new_content)
-                    
+
                     console.print(f"[green]Successfully updated {file_path}[/green]")
                 else:
                     console.print(f"[yellow]Changes to {file_path} were discarded[/yellow]")
                     return
-                
+
                 # Update the context with the modified file if changes were applied
                 if confirm in ['y', 'yes']:
                     for i, ctx in enumerate(self.context):
@@ -904,12 +905,12 @@ class ClaudeSonnetCodeAssistant:
                             }
                             self.current_tokens = self.current_tokens - old_tokens + total_file_tokens
                             break
-                
+
             except Exception as e:
                 stop_thinking.set()
                 await thinking_task
                 raise e
-                
+
         except Exception as e:
             console.print(f"[bold red]Error handling change request:[/bold red] {str(e)}")
 
@@ -971,7 +972,7 @@ class ClaudeSonnetCodeAssistant:
                 max_tokens=1000,
             )
 
-            summary = response.content[0].text
+            summary = response.content[0].tex
 
             # Format as a code summary
             formatted_summary = f"# SUMMARY OF {file_path}\n\n{summary}\n\n# Original file was {self.count_tokens(content):,} tokens and has been summarized."
@@ -1017,7 +1018,7 @@ class ClaudeSonnetCodeAssistant:
                 proc = await asyncio.create_subprocess_shell(
                     cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
-                stdout, _ = await proc.communicate()
+                stdout, _stderr = await proc.communicate()  # variable renamed for clarity, if you wish to access
                 matches = stdout.decode().strip().split("\n")
                 matches = [m for m in matches if m]  # Filter empty strings
 
@@ -1042,7 +1043,7 @@ class ClaudeSonnetCodeAssistant:
             proc = await asyncio.create_subprocess_shell(
                 cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-            stdout, _ = await proc.communicate()
+            stdout, _stderr = await proc.communicate()  # variable renamed for clarity
             results = stdout.decode().strip().split("\n")
             results = [r for r in results if r]  # Filter empty strings
 
@@ -1079,10 +1080,10 @@ class ClaudeSonnetCodeAssistant:
 
             try:
                 # Use the 'diff' command to create a unified diff with more context lines and line numbers
-                # -u shows unified diff format
+                # -u shows unified diff forma
                 # -N treats absent files as empty
                 # -p shows the function name for each change
-                # -U3 shows 3 lines of unified context
+                # -U3 shows 3 lines of unified contex
                 proc = await asyncio.create_subprocess_exec(
                     "diff",
                     "-u",
@@ -1237,7 +1238,7 @@ class ClaudeSonnetCodeAssistant:
                             current_chunk = []
                             in_chunk = False
 
-            # If there's a partial chunk left, add it
+            # If there's a partial chunk left, add i
             if current_chunk:
                 chunks.append(current_chunk)
 
@@ -1308,7 +1309,7 @@ class ClaudeSonnetCodeAssistant:
         return False, original
 
     async def analyze_and_segment_changes(
-        self, original: str, new: str, file_path: str
+        self, original: str, new: str
     ):
         """Analyze changes and recommend/implement segmented edits if changes are large."""
         # Parse files into lines
@@ -1370,7 +1371,7 @@ class ClaudeSonnetCodeAssistant:
                     # This line was removed
                     current_count += 1
 
-                # If we've reached the target segment size, create a segment
+                # If we've reached the target segment size, create a segmen
                 if current_count >= target_segment_size:
                     segments.append(
                         (
@@ -1383,7 +1384,7 @@ class ClaudeSonnetCodeAssistant:
                     segment_new_lines = []
                     current_count = 0
 
-            # Add any remaining segment
+            # Add any remaining segmen
             if segment_old_lines or segment_new_lines:
                 start_line = len(segments) * target_segment_size + 1
                 end_line = start_line + len(segment_old_lines) - 1
@@ -1435,12 +1436,12 @@ class ClaudeSonnetCodeAssistant:
             return path
         return os.path.abspath(os.path.join(self.current_dir, path))
 
-    async def _animate_thinking(self, styles, stop_event):
+    async def _animate_thinking(self, stop_event):
         """Display an animated thinking indicator like KITT from Knight Rider until stop_event is set."""
         # Use purple and orange colors for the beam
         colors = ["[bold magenta]", "[bold #FF8C00]"]  # Purple and orange
         position = 0
-        direction = 1  # 1 for moving right, -1 for moving left
+        direction = 1  # 1 for moving right, -1 for moving lef
         max_position = 20  # Width of the animation
         dots = "●" * 3  # The beam size (3 dots)
         while not stop_event.is_set():
@@ -1458,7 +1459,7 @@ class ClaudeSonnetCodeAssistant:
         console.print("\r" + " " * (max_position + 30) + "\r", end="")
 
 
-# Add the main entry point so the program can start
+# Add the main entry point so the program can star
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Claude Code Assistant CLI")
     parser.add_argument(
