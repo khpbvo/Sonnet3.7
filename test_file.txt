@@ -1,0 +1,2 @@
+This is a test file for the code:change command.
+Claude should be able to modify this file using the text-editor-tool.
