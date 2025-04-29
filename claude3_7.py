@@ -825,7 +825,7 @@ class ClaudeSonnetCodeAssistant:
 
             # Display an animated thinking indicator
             stop_thinking = asyncio.Event()
-            # Remove the thinking_styles parameter that's causing the error
+            # Fix: Remove any extra parameters and just pass the stop_thinking event
             thinking_task = asyncio.create_task(self._animate_thinking(stop_thinking))
 
             try:
@@ -858,7 +858,7 @@ class ClaudeSonnetCodeAssistant:
                 if hasattr(response, 'content'):
                     for block in response.content:
                         if hasattr(block, 'text'):
-                            new_content += block.tex
+                            new_content += block.text
 
                 # Clean up the response to extract just the code
                 if "```" in new_content:
