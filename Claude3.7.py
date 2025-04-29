@@ -201,10 +201,12 @@ class ClaudeSonnetCodeAssistant:
                         "[bold red]Invalid format. Use code:generate:file.py:prompt[/bold red]"
                     )
             elif cmd_type == "change" and len(parts) > 2:
-                file_prompt = parts[2].split(":", 1)
-                if len(file_prompt) == 2:
-                    # Use the implementation found later in the file (lines ~923-972)
-                    await self.handle_change(file_prompt[0], file_prompt[1])
+                # Improved: allow colons in prompt
+                first_colon = parts[2].find(":")
+                if first_colon != -1:
+                    file_path = parts[2][:first_colon]
+                    prompt = parts[2][first_colon+1:]
+                    await self.handle_change(file_path, prompt)
                 else:
                     console.print(
                         "[bold red]Invalid format. Use code:change:file.py:prompt[/bold red]"
@@ -363,7 +365,7 @@ class ClaudeSonnetCodeAssistant:
         pass
 
     async def handle_editor_tool(self, tool_call):
-        """Implements the Anthropic text-editor-tool commands."""
+        """Implements the Anthropic text_editor_20250124 commands."""
         try:
             params = tool_call.input if hasattr(tool_call, 'input') else tool_call.get('input', {})
             command = params.get('command')
@@ -377,6 +379,9 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[dim]Executing editor command: {command} on {path}[/dim]")
 
             abs_path = await self.resolve_path(path)
+
+            # The rest of your handler implementation should work fine for the commands
+            # view, str_replace, create, insert, append, undo_edit
 
             if command == 'view':
                 with_line_numbers = params.get('with_line_numbers', False)
@@ -548,7 +553,7 @@ class ClaudeSonnetCodeAssistant:
                 return f"Error: Unknown command '{command}'. Available commands: view, str_replace, create, insert, append, undo_edit."
 
         except Exception as e:
-            return f"Error in text-editor-tool: {str(e)}"
+            return f"Error in text editor tool: {str(e)}"
 
     async def handle_search(self, query: str):
         """
@@ -632,7 +637,6 @@ class ClaudeSonnetCodeAssistant:
             full_prompt = (
                 f"{context_str}Working directory: {self.current_dir}\n\n{prompt}"
             )
-
             # Display an animated thinking indicator
             thinking_styles = [
                 "[bold blue]Thinking...[/bold blue]",
@@ -644,76 +648,65 @@ class ClaudeSonnetCodeAssistant:
             stop_thinking = asyncio.Event()
             thinking_task = asyncio.create_task(self._animate_thinking(thinking_styles, stop_thinking))
             
-            try:
-                modified_files = set()
-                
-                response = await self.client.messages.create(
-                    model=self.model,
-                    messages=[MessageParam(role="user", content=full_prompt)],
-                    max_tokens=4000,
-                    stream=False,  # Changed to non-streaming for simplicity
-                    tools=[{
-                        "name": "text-editor-tool",
-                        "description": "A tool for viewing and editing files on disk.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "command": {"type": "string"},
-                                "path": {"type": "string"},
-                                "text": {"type": "string"},
-                                "find": {"type": "string"},
-                                "replace": {"type": "string"},
-                                "line": {"type": "integer"},
-                                "col": {"type": "integer"},
-                                "backup_path": {"type": "string"},
-                                "with_line_numbers": {"type": "boolean"}
-                            },
-                            "required": ["command", "path"]
-                        }
-                    }]
-                )
-                
-                stop_thinking.set()
-                await thinking_task
-                console.print("\r" + " " * 60 + "\r", end="")
-                console.print("\n[bold red]Assistant:[/bold red] ", end="")
-                
-                # Process the response
-                full_response = ""
-                
-                # First handle any tool uses
-                if hasattr(response, 'content') and hasattr(response, 'tool_uses') and response.tool_uses:
-                    for tool_use in response.tool_uses:
-                        tool_params = tool_use.input
-                        tool_command = tool_params.get('command', '')
-                        tool_path = tool_params.get('path', '')
-                        
-                        console.print(f"\n[dim]Using text-editor-tool: {tool_command} on {tool_path}[/dim]")
-                        
-                        # Execute the tool command
-                        tool_result = await self.handle_editor_tool(tool_use)
-                        console.print(f"[dim]{tool_result.split(os.linesep)[0]}...[/dim]")
-                        
-                        # Track modified files for context updates
-                        if tool_command in ['str_replace', 'create', 'insert', 'append'] and tool_path:
-                            modified_files.add(tool_path)
-                        
-                        # Continue the conversation with tool result
-                        tool_response = await self.client.messages.create(
+            modified_files = set()
+            
+            # Use the proper tool name according to Anthropic docs: "text_editor_20250124"
+            response = await self.client.messages.create(
+                model=self.model,
+                messages=[MessageParam(role="user", content=full_prompt)],
+                max_tokens=4000,
+                stream=False,  # Non-streaming
+                tools=[{
+                    "name": "text_editor_20250124",
+                    "description": "A tool for viewing and editing files on disk.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "path": {"type": "string"},
+                            "text": {"type": "string"},
+                            "find": {"type": "string"},
+                            "replace": {"type": "string"},
+                            "line": {"type": "integer"},
+                            "col": {"type": "integer"},
+                            "backup_path": {"type": "string"},
+                            "with_line_numbers": {"type": "boolean"}
+                        },
+                        "required": ["command", "path"]
+                    }
+                }]
+            )
+            
+            stop_thinking.set()
+            await thinking_task
+            console.print("\r" + " " * 60 + "\r", end="")
+            console.print("\n[bold red]Assistant:[/bold red] ", end="")
+            
+            full_response = ""
+            
+            # Handle any tool uses
+            if hasattr(response, 'tool_uses') and response.tool_uses:
+                for tool_use in response.tool_uses:
+                    if tool_use.name == "text_editor_20250124":
+                        cmd, path = tool_use.input.get('command', ''), tool_use.input.get('path', '')
+                        console.print(f"\n[dim]Using text editor tool: {cmd} on {path}[/dim]")
+                        result = await self.handle_editor_tool(tool_use)
+                        console.print(f"[dim]{result.split(os.linesep)[0]}...[/dim]")
+                        if cmd in ['str_replace','create','insert','append'] and path:
+                            modified_files.add(path)
+                        # send tool result back
+                        follow = await self.client.messages.create(
                             model=self.model,
                             messages=[
-                                {
-                                    "role": "user", 
-                                    "content": [
-                                        {"type": "text", "text": full_prompt},
-                                        {"type": "tool_result", "tool_use_id": tool_use.id, "content": tool_result}
-                                    ]
-                                }
+                                {"role": "user", "content": [
+                                    {"type": "text", "text": full_prompt},
+                                    {"type": "tool_result", "tool_use_id": tool_use.id, "content": result}
+                                ]}
                             ],
                             max_tokens=4000,
                             stream=False,
                             tools=[{
-                                "name": "text-editor-tool",
+                                "name": "text_editor_20250124",
                                 "description": "A tool for viewing and editing files on disk.",
                                 "input_schema": {
                                     "type": "object",
@@ -732,123 +725,59 @@ class ClaudeSonnetCodeAssistant:
                                 }
                             }]
                         )
-                        
-                        # Handle nested tool uses recursively
-                        if hasattr(tool_response, 'tool_uses') and tool_response.tool_uses:
-                            for nested_tool_use in tool_response.tool_uses:
-                                nested_tool_params = nested_tool_use.input
-                                nested_tool_command = nested_tool_params.get('command', '')
-                                nested_tool_path = nested_tool_params.get('path', '')
-                                
-                                console.print(f"\n[dim]Using text-editor-tool (nested): {nested_tool_command} on {nested_tool_path}[/dim]")
-                                
-                                # Execute the nested tool command
-                                nested_result = await self.handle_editor_tool(nested_tool_use)
-                                console.print(f"[dim]{nested_result.split(os.linesep)[0]}...[/dim]")
-                                
-                                # Track modified files
-                                if nested_tool_command in ['str_replace', 'create', 'insert', 'append'] and nested_tool_path:
-                                    modified_files.add(nested_tool_path)
-                                
-                                # Continue the conversation with the nested tool result
-                                await self.client.messages.create(
-                                    model=self.model,
-                                    messages=[
-                                        {
-                                            "role": "user", 
-                                            "content": [
-                                                {"type": "text", "text": full_prompt},
-                                                {"type": "tool_result", "tool_use_id": nested_tool_use.id, "content": nested_result}
-                                            ]
-                                        }
-                                    ],
-                                    max_tokens=4000,
-                                    stream=False
-                                )
-                        
-                        # Add tool response to full response
-                        if hasattr(tool_response, 'content') and tool_response.content:
-                            for content_block in tool_response.content:
-                                if hasattr(content_block, 'text'):
-                                    text = content_block.text
-                                    full_response += text
-                                    console.print(text, highlight=False)
-                
-                # Add original response if there was no tool use or after tool use
-                if hasattr(response, 'content') and response.content:
-                    for content_block in response.content:
-                        if hasattr(content_block, 'text'):
-                            text = content_block.text
-                            if not full_response:  # Only add if we haven't added from tool response
-                                full_response += text
-                                console.print(text, highlight=False)
-                
-                console.print()  # newline after response
-                
-                # Update context with any modified files
-                if modified_files:
-                    console.print(f"[yellow]Updating context with modified files...[/yellow]")
-                    for file_path in modified_files:
-                        try:
-                            resolved_path = await self.resolve_path(file_path)
-                            if os.path.exists(resolved_path):
-                                # Read the updated content
-                                updated_content = await self.read_file(resolved_path)
-                                
-                                # Find if file is already in context
-                                file_in_context = False
-                                for i, ctx in enumerate(self.context):
-                                    if ctx.get("type") == "file" and ctx.get("path") == file_path:
-                                        # File exists in context, update it
-                                        old_tokens = ctx.get("tokens", 0)
-                                        tokens_in_file = self.count_tokens(updated_content)
-                                        tokens_in_path = self.count_tokens(file_path)
-                                        total_file_tokens = tokens_in_file + tokens_in_path
-                                        
-                                        # Update token count
-                                        self.current_tokens = self.current_tokens - old_tokens + total_file_tokens
-                                        
-                                        # Update the context entry
-                                        self.context[i] = {
-                                            "type": "file",
-                                            "path": file_path,
-                                            "content": updated_content,
-                                            "tokens": total_file_tokens,
-                                        }
-                                        file_in_context = True
-                                        console.print(f"[green]Updated {file_path} in context[/green]")
-                                        break
-                                
-                                # If file not in context, add it
-                                if not file_in_context:
-                                    tokens_in_file = self.count_tokens(updated_content)
-                                    tokens_in_path = self.count_tokens(file_path)
-                                    total_file_tokens = tokens_in_file + tokens_in_path
-                                    
-                                    self.context.append({
-                                        "type": "file",
-                                        "path": file_path,
-                                        "content": updated_content,
-                                        "tokens": total_file_tokens,
-                                    })
-                                    self.current_tokens += total_file_tokens
-                                    console.print(f"[green]Added {file_path} to context[/green]")
-                        except Exception as e:
-                            console.print(f"[bold red]Error updating context for {file_path}:[/bold red] {str(e)}")
-            
-            except Exception as e:
-                stop_thinking.set()
-                await thinking_task
-                raise e
-                
-        except anthropic.APIStatusError as e:
-            error_message = str(e)
-            if "overloaded_error" in error_message:
-                console.print("\r[bold red]Error: Claude API is currently overloaded. Please try again in a few moments.[/bold red]")
-            else:
-                console.print(f"\r[bold red]API Error communicating with Claude:[/bold red] {str(e)}")
-        except Exception as e:
-            console.print(f"\r[bold red]Error communicating with Claude:[/bold red] {str(e)}")
+                        # nested uses
+                        if hasattr(follow, 'tool_uses') and follow.tool_uses:
+                            for nested in follow.tool_uses:
+                                if nested.name == "text_editor_20250124":
+                                    ncmd, npath = nested.input.get('command', ''), nested.input.get('path', '')
+                                    console.print(f"\n[dim]Nested tool: {ncmd} on {npath}[/dim]")
+                                    nres = await self.handle_editor_tool(nested)
+                                    console.print(f"[dim]{nres.split(os.linesep)[0]}...[/dim]")
+                                    if ncmd in ['str_replace', 'create', 'insert', 'append'] and npath:
+                                        modified_files.add(npath)
+                                    await self.client.messages.create(
+                                        model=self.model,
+                                        messages=[{"role": "user", "content": [
+                                            {"type": "text", "text": full_prompt},
+                                            {"type": "tool_result", "tool_use_id": nested.id, "content": nres}
+                                        ]}],
+                                        max_tokens=4000,
+                                        stream=False
+                                    )
+                for block in getattr(follow, 'content', []):
+                    txt = getattr(block, 'text', None)
+                    if txt:
+                        full_response += txt
+                        console.print(txt, highlight=False)
+            # fallback response
+            if not full_response and hasattr(response, 'content'):
+                for blk in response.content:
+                    txt = getattr(blk, 'text', None)
+                    if txt:
+                        full_response += txt
+                        console.print(txt, highlight=False)
+            console.print()
+            # update context
+            if modified_files:
+                console.print("[yellow]Updating context with modified files...[/yellow]")
+                for fpath in modified_files:
+                    abs = fpath and await self.resolve_path(fpath)
+                    if abs and os.path.exists(abs):
+                        cont = await self.read_file(abs)
+                        # update or add
+                        for i, ctx in enumerate(self.context):
+                            if ctx.get('type') == 'file' and ctx.get('path') == fpath:
+                                old = ctx.get('tokens', 0)
+                                tok = self.count_tokens(cont) + self.count_tokens(fpath)
+                                self.context[i] = {'type': 'file', 'path': fpath, 'content': cont, 'tokens': tok}
+                                self.current_tokens = self.current_tokens - old + tok
+                                console.print(f"[green]Updated {fpath}[/green]")
+                                break
+                        else:
+                            tok = self.count_tokens(cont) + self.count_tokens(fpath)
+                            self.context.append({'type': 'file', 'path': fpath, 'content': cont, 'tokens': tok})
+                            self.current_tokens += tok
+                            console.print(f"[green]Added {fpath}[/green]")
 
     async def handle_change(self, file_path: str, prompt: str):
         """Request Claude to change a file using the text-editor-tool."""
