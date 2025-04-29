@@ -124,10 +124,8 @@ class ClaudeSonnetCodeAssistant:
             Panel.fit(
                 "[bold blue]Claude Sonnet Code Assistant[/bold blue]\n"
                 f"[green]Using model: {self.model}[/green]\n"
-                (
-                    "Type [bold]help[/bold] for available commands or "
-                    "[bold]exit[/bold] to quit"
-                ),
+                "Type [bold]help[/bold] for available commands or "
+                "[bold]exit[/bold] to quit",
                 title="Welcome",
                 subtitle="v1.0",
             )
@@ -793,13 +791,13 @@ class ClaudeSonnetCodeAssistant:
     async def handle_change(self, file_path: str, prompt: str):
         """Generate a diff and modify a file based on the prompt."""
         try:
-            # First, ensure the file exists and read its conten
+            # First, ensure the file exists and read its content
             resolved_path = await self.resolve_path(file_path)
             if not os.path.exists(resolved_path):
                 console.print(f"[bold red]File does not exist:[/bold red] {resolved_path}")
                 return
 
-            # Read the file conten
+            # Read the file content
             original_content = await self.read_file(resolved_path)
             if not original_content:
                 console.print(f"[bold red]Could not read file:[/bold red] {resolved_path}")
@@ -826,15 +824,9 @@ class ClaudeSonnetCodeAssistant:
                 console.print(f"[green]Added {file_path} to context[/green]")
 
             # Display an animated thinking indicator
-            thinking_styles = [
-                "[bold blue]Thinking...[/bold blue]",
-                "[bold green]Thinking...[/bold green]",
-                "[bold yellow]Thinking...[/bold yellow]",
-                "[bold magenta]Thinking...[/bold magenta]",
-                "[bold cyan]Thinking...[/bold cyan]"
-            ]
             stop_thinking = asyncio.Event()
-            thinking_task = asyncio.create_task(self._animate_thinking(thinking_styles, stop_thinking))
+            # Remove the thinking_styles parameter that's causing the error
+            thinking_task = asyncio.create_task(self._animate_thinking(stop_thinking))
 
             try:
                 # Use direct API call to get a modified version of the file
