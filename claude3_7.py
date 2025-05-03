@@ -375,6 +375,7 @@ class ClaudeSonnetCodeAssistant:
     async def handle_editor_tool(self, tool_call):
         """Implements the Anthropic text_editor_20250124 commands."""
         try:
+            # Extract parameters from the tool call
             params = tool_call.input if hasattr(tool_call, 'input') else tool_call.get('input', {})
             command = params.get('command')
             path = params.get('path')
@@ -386,11 +387,10 @@ class ClaudeSonnetCodeAssistant:
 
             console.print(f"[dim]Executing editor command: {command} on {path}[/dim]")
 
+            # Resolve path to absolute path
             abs_path = await self.resolve_path(path)
 
-            # The rest of your handler implementation should work fine for the commands
-            # view, str_replace, create, insert, append, undo_edi
-
+            # Implement the different commands
             if command == 'view':
                 with_line_numbers = params.get('with_line_numbers', False)
                 if not os.path.exists(abs_path):
@@ -402,12 +402,14 @@ class ClaudeSonnetCodeAssistant:
                         return ''.join(f"{i+1}: {line}" for i, line in enumerate(lines))
                     return ''.join(lines)
                 except UnicodeDecodeError:
-                    # Try with a different encoding
+                    # Try with a different encoding if UTF-8 fails
                     with open(abs_path, 'r', encoding='latin-1') as f:
                         lines = f.readlines()
                     if with_line_numbers:
                         return ''.join(f"{i+1}: {line}" for i, line in enumerate(lines))
                     return ''.join(lines)
+                except Exception as e:
+                    return f"Error reading file: {str(e)}"
 
             elif command == 'str_replace':
                 find = params.get('find', '')
@@ -420,7 +422,7 @@ class ClaudeSonnetCodeAssistant:
                     return f"Error: File {abs_path} does not exist."
 
                 try:
-                    # Read the current conten
+                    # Read the current content
                     with open(abs_path, 'r', encoding='utf-8') as f:
                         content = f.read()
 
@@ -431,14 +433,53 @@ class ClaudeSonnetCodeAssistant:
                     with open(backup_path, 'w', encoding='utf-8') as f:
                         f.write(content)
 
-                    # Replace and write the new conten
-                    new_content = content.replace(find, replace)
+                    # Replace and write the new content
+                    # KEY FIX: Make sure we're not replacing all content with an empty string when find is present but replace is empty
+                    new_content = content
+                    if find in content:
+                        new_content = content.replace(find, replace)
+                        
+                    # Verify we still have content and didn't remove everything
+                    if not new_content.strip() and content.strip():
+                        # This is a dangerous replacement that would empty the file
+                        return f"Warning: Replacement would remove all content from {abs_path}. Operation aborted. Please specify a more targeted replacement."
+                    
+                    # Write the modified content
                     with open(abs_path, 'w', encoding='utf-8') as f:
                         f.write(new_content)
 
                     # Return a helpful message indicating changes
                     occurrences = content.count(find)
                     return f"Replaced {occurrences} occurrence(s) of '{find}' with '{replace}' in {abs_path}. Backup created at {backup_path}."
+                except UnicodeDecodeError:
+                    # Try with a different encoding
+                    try:
+                        with open(abs_path, 'r', encoding='latin-1') as f:
+                            content = f.read()
+                        
+                        # Create backup
+                        backup_dir = os.path.join(tempfile.gettempdir(), "claude_code_assistant_backups")
+                        os.makedirs(backup_dir, exist_ok=True)
+                        backup_path = os.path.join(backup_dir, f"{os.path.basename(abs_path)}.bak")
+                        with open(backup_path, 'w', encoding='latin-1') as f:
+                            f.write(content)
+                        
+                        # Replace and write
+                        new_content = content
+                        if find in content:
+                            new_content = content.replace(find, replace)
+                            
+                        # Verify we still have content
+                        if not new_content.strip() and content.strip():
+                            return f"Warning: Replacement would remove all content from {abs_path}. Operation aborted. Please specify a more targeted replacement."
+                        
+                        with open(abs_path, 'w', encoding='latin-1') as f:
+                            f.write(new_content)
+                        
+                        occurrences = content.count(find)
+                        return f"Replaced {occurrences} occurrence(s) of '{find}' with '{replace}' in {abs_path} (using latin-1 encoding). Backup created at {backup_path}."
+                    except Exception as e:
+                        return f"Error replacing text with latin-1 encoding: {str(e)}"
                 except Exception as e:
                     return f"Error replacing text: {str(e)}"
 
@@ -446,12 +487,12 @@ class ClaudeSonnetCodeAssistant:
                 text = params.get('text', '')
 
                 try:
-                    # Create directories if they don't exis
+                    # Create directories if they don't exist
                     dir_path = os.path.dirname(abs_path)
                     if dir_path:
                         os.makedirs(dir_path, exist_ok=True)
 
-                    # Write the file
+                    # Write the file with proper encoding handling
                     with open(abs_path, 'w', encoding='utf-8') as f:
                         f.write(text)
 
@@ -468,7 +509,7 @@ class ClaudeSonnetCodeAssistant:
                     return f"Error: File {abs_path} does not exist."
 
                 try:
-                    # Read the current conten
+                    # Read the current content
                     with open(abs_path, 'r', encoding='utf-8') as f:
                         lines = f.readlines()
 
@@ -487,27 +528,116 @@ class ClaudeSonnetCodeAssistant:
                     else:
                         # Adjust line number (1-based to 0-based)
                         line_idx = line - 1
-
-                        # Ensure the line exists
+                        
+                        # Ensure the line exists and index is valid
                         if line_idx < 0:
                             line_idx = 0
-
+                        
                         # Get the original line
-                        orig_line = lines[line_idx] if line_idx < len(lines) else ''
+                        if line_idx < len(lines):
+                            orig_line = lines[line_idx]
+                        else:
+                            # This should not happen given the earlier check, but just to be safe
+                            orig_line = ''
+                            lines.append(orig_line)
 
                         # Ensure the column is valid
                         col = max(0, min(col, len(orig_line)))
 
-                        # Insert tex
+                        # Insert text at the specified column
                         lines[line_idx] = orig_line[:col] + text + orig_line[col:]
 
-                    # Write the modified conten
+                    # Write the modified content
                     with open(abs_path, 'w', encoding='utf-8') as f:
                         f.writelines(lines)
 
                     return f"Inserted {len(text)} characters at line {line}, column {col} in {abs_path}. Backup created at {backup_path}."
+                except UnicodeDecodeError:
+                    # Try with a different encoding
+                    try:
+                        with open(abs_path, 'r', encoding='latin-1') as f:
+                            lines = f.readlines()
+                        
+                        # Create backup
+                        backup_dir = os.path.join(tempfile.gettempdir(), "claude_code_assistant_backups")
+                        os.makedirs(backup_dir, exist_ok=True)
+                        backup_path = os.path.join(backup_dir, f"{os.path.basename(abs_path)}.bak")
+                        with open(backup_path, 'w', encoding='latin-1') as f:
+                            f.writelines(lines)
+                        
+                        # Insert logic (same as above)
+                        if line > len(lines):
+                            lines.extend([''] * (line - len(lines)))
+                            lines.append(text + '\n')
+                        else:
+                            line_idx = max(0, line - 1)
+                            if line_idx < len(lines):
+                                orig_line = lines[line_idx]
+                            else:
+                                orig_line = ''
+                                lines.append(orig_line)
+                            
+                            col = max(0, min(col, len(orig_line)))
+                            lines[line_idx] = orig_line[:col] + text + orig_line[col:]
+                        
+                        with open(abs_path, 'w', encoding='latin-1') as f:
+                            f.writelines(lines)
+                        
+                        return f"Inserted {len(text)} characters at line {line}, column {col} in {abs_path} (using latin-1 encoding). Backup created at {backup_path}."
+                    except Exception as e:
+                        return f"Error inserting text with latin-1 encoding: {str(e)}"
                 except Exception as e:
                     return f"Error inserting text: {str(e)}"
+
+            elif command == 'append':
+                text = params.get('text', '')
+
+                if not os.path.exists(abs_path):
+                    return f"Error: File {abs_path} does not exist."
+
+                try:
+                    # Create a backup
+                    with open(abs_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+
+                    backup_dir = os.path.join(tempfile.gettempdir(), "claude_code_assistant_backups")
+                    os.makedirs(backup_dir, exist_ok=True)
+                    backup_path = os.path.join(backup_dir, f"{os.path.basename(abs_path)}.bak")
+
+                    with open(backup_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+
+                    # Append the text
+                    with open(abs_path, 'a', encoding='utf-8') as f:
+                        # Add a newline if the file doesn't end with one and we're adding content
+                        if content and not content.endswith('\n') and text:
+                            f.write('\n')
+                        f.write(text)
+
+                    return f"Appended {len(text)} characters to {abs_path}. Backup created at {backup_path}."
+                except UnicodeDecodeError:
+                    # Try with latin-1 encoding
+                    try:
+                        with open(abs_path, 'r', encoding='latin-1') as f:
+                            content = f.read()
+                        
+                        backup_dir = os.path.join(tempfile.gettempdir(), "claude_code_assistant_backups")
+                        os.makedirs(backup_dir, exist_ok=True)
+                        backup_path = os.path.join(backup_dir, f"{os.path.basename(abs_path)}.bak")
+                        
+                        with open(backup_path, 'w', encoding='latin-1') as f:
+                            f.write(content)
+                        
+                        with open(abs_path, 'a', encoding='latin-1') as f:
+                            if content and not content.endswith('\n') and text:
+                                f.write('\n')
+                            f.write(text)
+                        
+                        return f"Appended {len(text)} characters to {abs_path} (using latin-1 encoding). Backup created at {backup_path}."
+                    except Exception as e:
+                        return f"Error appending text with latin-1 encoding: {str(e)}"
+                except Exception as e:
+                    return f"Error appending text: {str(e)}"
 
             elif command == 'undo_edit':
                 backup_path = params.get('backup_path')
@@ -527,35 +657,18 @@ class ClaudeSonnetCodeAssistant:
                         dst.write(content)
 
                     return f"Restored {abs_path} from backup {backup_path_resolved}."
+                except UnicodeDecodeError:
+                    # Try with latin-1 encoding
+                    try:
+                        with open(backup_path_resolved, 'r', encoding='latin-1') as src, open(abs_path, 'w', encoding='latin-1') as dst:
+                            content = src.read()
+                            dst.write(content)
+                        
+                        return f"Restored {abs_path} from backup {backup_path_resolved} (using latin-1 encoding)."
+                    except Exception as e:
+                        return f"Error restoring from backup with latin-1 encoding: {str(e)}"
                 except Exception as e:
                     return f"Error restoring from backup: {str(e)}"
-
-            elif command == 'append':
-                # New command to append text to the end of a file
-                text = params.get('text', '')
-
-                if not os.path.exists(abs_path):
-                    return f"Error: File {abs_path} does not exist."
-
-                try:
-                    # Create a backup
-                    with open(abs_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-
-                    backup_dir = os.path.join(tempfile.gettempdir(), "claude_code_assistant_backups")
-                    os.makedirs(backup_dir, exist_ok=True)
-                    backup_path = os.path.join(backup_dir, f"{os.path.basename(abs_path)}.bak")
-
-                    with open(backup_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-
-                    # Append the tex
-                    with open(abs_path, 'a', encoding='utf-8') as f:
-                        f.write(text)
-
-                    return f"Appended {len(text)} characters to {abs_path}. Backup created at {backup_path}."
-                except Exception as e:
-                    return f"Error appending text: {str(e)}"
 
             else:
                 return f"Error: Unknown command '{command}'. Available commands: view, str_replace, create, insert, append, undo_edit."
@@ -607,9 +720,9 @@ class ClaudeSonnetCodeAssistant:
                 cwd=self.current_dir,
             )
 
-            stdout, _ = await process.communicate()
+            stdout, stderr = await process.communicate()
 
-            # Display outpu
+            # Display output
             if stdout:
                 stdout_str = stdout.decode()
                 console.print(
@@ -633,6 +746,11 @@ class ClaudeSonnetCodeAssistant:
                 f"[bold red]Unknown error executing shell command:[/bold red] {str(e)}"
             )
 
+    """
+    This is an optimized implementation for the text editor tool integration, based on Anthropic's
+    official documentation. Replace the relevant part of your Claude3.7.py file with this code.
+    """
+
     async def ask_claude(self, prompt: str):
         """Send a direct prompt to Claude, handling tool_use blocks for the text-editor-tool."""
         try:
@@ -645,148 +763,235 @@ class ClaudeSonnetCodeAssistant:
                     ext = os.path.splitext(path)[1].lstrip(".")
                     context_str += f"File: {path}\n```{ext}\n{content}\n```\n\n"
 
-            # Create the full promp
+            # Create the full prompt
             full_prompt = (
                 f"{context_str}Working directory: {self.current_dir}\n\n{prompt}"
             )
+
             # Display an animated thinking indicator
+            thinking_styles = [
+                "[bold blue]Thinking...[/bold blue]",
+                "[bold green]Thinking...[/bold green]",
+                "[bold yellow]Thinking...[/bold yellow]",
+                "[bold magenta]Thinking...[/bold magenta]",
+                "[bold cyan]Thinking...[/bold cyan]"
+            ]
             stop_thinking = asyncio.Event()
             thinking_task = asyncio.create_task(self._animate_thinking(stop_thinking))
+        
+            try:
+                modified_files = set()
 
-            modified_files = set()
-
-            # Use the proper tool name according to Anthropic docs: "text_editor_20250124"
-            response = await self.client.messages.create(
-                model=self.model,
-                messages=[MessageParam(role="user", content=full_prompt)],
-                max_tokens=4000,
-                stream=False,  # Non-streaming
-                tools=[{
-                    "name": "text_editor_20250124",
-                    "description": "A tool for viewing and editing files on disk.",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "command": {"type": "string"},
-                            "path": {"type": "string"},
-                            "text": {"type": "string"},
-                            "find": {"type": "string"},
-                            "replace": {"type": "string"},
-                            "line": {"type": "integer"},
-                            "col": {"type": "integer"},
-                            "backup_path": {"type": "string"},
-                            "with_line_numbers": {"type": "boolean"}
-                        },
-                        "required": ["command", "path"]
-                    }
-                }]
-            )
-
-            stop_thinking.set()
-            await thinking_task
-            console.print("\r" + " " * 60 + "\r", end="")
-            console.print("\n[bold red]Assistant:[/bold red] ", end="")
-
-            full_response = ""
-
-            # Handle any tool uses
-            follow = None  # Ensure the variable always exists for later access
-            if hasattr(response, 'tool_uses') and response.tool_uses:
-                for tool_use in response.tool_uses:
-                    if tool_use.name == "text_editor_20250124":
-                        cmd, path = tool_use.input.get('command', ''), tool_use.input.get('path', '')
-                        console.print(f"\n[dim]Using text editor tool: {cmd} on {path}[/dim]")
-                        result = await self.handle_editor_tool(tool_use)
-                        console.print(f"[dim]{result.split(os.linesep)[0]}...[/dim]")
-                        if cmd in ['str_replace','create','insert','append'] and path:
-                            modified_files.add(path)
-                        # send tool result back
-                        follow = await self.client.messages.create(
-                            model=self.model,
-                            messages=[
-                                {"role": "user", "content": [
-                                    {"type": "text", "text": full_prompt},
-                                    {"type": "tool_result", "tool_use_id": tool_use.id, "content": result}
-                                ]}
-                            ],
-                            max_tokens=4000,
-                            stream=False,
-                            tools=[{
-                                "name": "text_editor_20250124",
-                                "description": "A tool for viewing and editing files on disk.",
-                                "input_schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "command": {"type": "string"},
-                                        "path": {"type": "string"},
-                                        "text": {"type": "string"},
-                                        "find": {"type": "string"},
-                                        "replace": {"type": "string"},
-                                        "line": {"type": "integer"},
-                                        "col": {"type": "integer"},
-                                        "backup_path": {"type": "string"},
-                                        "with_line_numbers": {"type": "boolean"}
-                                    },
-                                    "required": ["command", "path"]
-                                }
-                            }]
-                        )
-                        # nested uses
-                        if hasattr(follow, 'tool_uses') and follow.tool_uses:
-                            for nested in follow.tool_uses:
-                                if nested.name == "text_editor_20250124":
-                                    ncmd, npath = nested.input.get('command', ''), nested.input.get('path', '')
-                                    console.print(f"\n[dim]Nested tool: {ncmd} on {npath}[/dim]")
-                                    nres = await self.handle_editor_tool(nested)
-                                    console.print(f"[dim]{nres.split(os.linesep)[0]}...[/dim]")
-                                    if ncmd in ['str_replace', 'create', 'insert', 'append'] and npath:
-                                        modified_files.add(npath)
-                                    await self.client.messages.create(
-                                        model=self.model,
-                                        messages=[{"role": "user", "content": [
+                # Use the proper tool name according to Anthropic docs: "text_editor_20250124"
+                response = await self.client.messages.create(
+                    model=self.model,
+                    messages=[MessageParam(role="user", content=full_prompt)],
+                    max_tokens=4000,
+                    stream=False,  # Changed to non-streaming for simplicity
+                    tools=[{
+                        "name": "text_editor_20250124",  # Correct tool name as per Anthropic docs
+                        "description": "A tool for viewing and editing files on disk.",
+                        "custom": {
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {},
+                                "required": []
+                            }
+                        }
+                    }]
+                )
+            
+                stop_thinking.set()
+                await thinking_task
+                console.print("\r" + " " * 60 + "\r", end="")
+                console.print("\n[bold red]Assistant:[/bold red] ", end="")
+            
+                # Process the response
+                full_response = ""
+            
+                # First handle any tool uses
+                if hasattr(response, 'content') and hasattr(response, 'tool_uses') and response.tool_uses:
+                    for tool_use in response.tool_uses:
+                        if tool_use.name == "text_editor_20250124":  # Check for correct tool name
+                            # Extract tool parameters
+                            tool_params = tool_use.input
+                            tool_command = tool_params.get('command', '')
+                            tool_path = tool_params.get('path', '')
+                        
+                            console.print(f"\n[dim]Using text editor tool: {tool_command} on {tool_path}[/dim]")
+                        
+                            # Execute the tool command
+                            tool_result = await self.handle_editor_tool(tool_use)
+                        
+                            # Print a preview of the result (just the first line)
+                            if tool_result:
+                                first_line = tool_result.split(os.linesep)[0]
+                                console.print(f"[dim]{first_line}...[/dim]")
+                        
+                                # Track modified files for context updates
+                            if tool_command in ['str_replace', 'create', 'insert', 'append'] and tool_path:
+                                modified_files.add(tool_path)
+                        
+                            # Continue the conversation with tool result
+                            tool_response = await self.client.messages.create(
+                                model=self.model,
+                                messages=[
+                                    {
+                                        "role": "user", 
+                                        "content": [
                                             {"type": "text", "text": full_prompt},
-                                            {"type": "tool_result", "tool_use_id": nested.id, "content": nres}
-                                        ]}],
-                                        max_tokens=4000,
-                                        stream=False
-                                    )
-            if follow is not None:
-                for block in getattr(follow, 'content', []):
-                    txt = getattr(block, 'text', None)
-                    if txt:
-                        full_response += txt
-                        console.print(txt, highlight=False)
-            # fallback response
-            if not full_response and hasattr(response, 'content'):
-                for blk in response.content:
-                    txt = getattr(blk, 'text', None)
-                    if txt:
-                        full_response += txt
-                        console.print(txt, highlight=False)
-            console.print()
-            # update contex
-            if modified_files:
-                console.print("[yellow]Updating context with modified files...[/yellow]")
-                for fpath in modified_files:
-                    abs = fpath and await self.resolve_path(fpath)
-                    if abs and os.path.exists(abs):
-                        cont = await self.read_file(abs)
-                        # update or add
-                        for i, ctx in enumerate(self.context):
-                            if ctx.get('type') == 'file' and ctx.get('path') == fpath:
-                                old = ctx.get('tokens', 0)
-                                tok = self.count_tokens(cont) + self.count_tokens(fpath)
-                                self.context[i] = {'type': 'file', 'path': fpath, 'content': cont, 'tokens': tok}
-                                self.current_tokens = self.current_tokens - old + tok
-                                console.print(f"[green]Updated {fpath}[/green]")
-                                break
-                        else:
-                            tok = self.count_tokens(cont) + self.count_tokens(fpath)
-                            self.context.append({'type': 'file', 'path': fpath, 'content': cont, 'tokens': tok})
-                            self.current_tokens += tok
-                            console.print(f"[green]Added {fpath}[/green]")
+                                            {"type": "tool_result", "tool_use_id": tool_use.id, "content": tool_result}
+                                        ]
+                                    }
+                                ],
+                                max_tokens=4000,
+                                stream=False,
+                                tools=[{
+                                    "name": "text_editor_20250124",  # Correct tool name
+                                    "description": "A tool for viewing and editing files on disk.",
+                                    "custom": { "input_schema": {
+                                        "type": "object",
+                                        "properties": {},
+                                        "required": []
+                                    } }
+                                    }]
+                                )
+                        
+                            # Handle nested tool uses recursively
+                            if hasattr(tool_response, 'tool_uses') and tool_response.tool_uses:
+                                for nested_tool_use in tool_response.tool_uses:
+                                    if nested_tool_use.name == "text_editor_20250124":  # Check for correct tool name
+                                        nested_tool_params = nested_tool_use.input
+                                        nested_tool_command = nested_tool_params.get('command', '')
+                                        nested_tool_path = nested_tool_params.get('path', '')
+                                    
+                                        console.print(f"\n[dim]Using text editor tool (nested): {nested_tool_command} on {nested_tool_path}[/dim]")
+                                    
+                                        # Execute the nested tool command
+                                        nested_result = await self.handle_editor_tool(nested_tool_use)
+                                    
+                                        # Print a preview of the result
+                                        if nested_result:
+                                            first_line = nested_result.split(os.linesep)[0]
+                                            console.print(f"[dim]{first_line}...[/dim]")
+                                    
+                                        # Track modified files
+                                        if nested_tool_command in ['str_replace', 'create', 'insert', 'append'] and nested_tool_path:
+                                            modified_files.add(nested_tool_path)
+                                    
+                                        # Continue the conversation with the nested tool result
+                                        nested_response = await self.client.messages.create(
+                                            model=self.model,
+                                            messages=[
+                                                {
+                                                    "role": "user", 
+                                                    "content": [
+                                                        {"type": "text", "text": full_prompt},
+                                                        {"type": "tool_result", "tool_use_id": nested_tool_use.id, "content": nested_result}
+                                                    ]
+                                                }
+                                            ],
+                                            max_tokens=4000,
+                                            stream=False
+                                        )
+                                    
+                                    
+                                        # Add nested response content to full response if available
+                                        if hasattr(nested_response, 'content') and nested_response.content:
+                                            for content_block in nested_response.content:
+                                                # Safely extract and print block text
+                                                text = getattr(content_block, 'text', '')
+                                                if text:
+                                                    full_response += text
+                                                    console.print(text, highlight=False)
+                        
+                            # Add tool response to full response
+                            if hasattr(tool_response, 'content') and tool_response.content:
+                                for content_block in tool_response.content:
+                                    # Safely extract and print block text
+                                    text = getattr(content_block, 'text', '')
+                                    if text:
+                                        full_response += text
+                                        console.print(text, highlight=False)
+            
+                # Add original response if there was no tool use or after tool use
+                if not full_response and hasattr(response, 'content') and response.content:
+                    for content_block in response.content:
+                        # Safely extract and print block text
+                        text = getattr(content_block, 'text', '')
+                        if text:
+                            full_response += text
+                            console.print(text, highlight=False)
+            
+                console.print()  # newline after response
+            
+                # Update context with any modified files
+                if modified_files:
+                    console.print(f"[yellow]Updating context with modified files...[/yellow]")
+                    for file_path in modified_files:
+                        try:
+                            resolved_path = await self.resolve_path(file_path)
+                            if os.path.exists(resolved_path):
+                                # Read the updated content
+                                updated_content = await self.read_file(resolved_path)
+                            
+                                # Find if file is already in context
+                                file_in_context = False
+                                for i, ctx in enumerate(self.context):
+                                    if ctx.get("type") == "file" and ctx.get("path") == file_path:
+                                        # File exists in context, update it
+                                        old_tokens = ctx.get("tokens", 0)
+                                        tokens_in_file = self.count_tokens(updated_content)
+                                        tokens_in_path = self.count_tokens(file_path)
+                                        total_file_tokens = tokens_in_file + tokens_in_path
+                                    
+                                        # Update token count
+                                        self.current_tokens = self.current_tokens - old_tokens + total_file_tokens
+                                    
+                                        # Update the context entry
+                                        self.context[i] = {
+                                            "type": "file",
+                                            "path": file_path,
+                                            "content": updated_content,
+                                            "tokens": total_file_tokens,
+                                        }
+                                        file_in_context = True
+                                        console.print(f"[green]Updated {file_path} in context[/green]")
+                                        break
+                            
+                                # If file not in context, add it
+                                if not file_in_context:
+                                    tokens_in_file = self.count_tokens(updated_content)
+                                    tokens_in_path = self.count_tokens(file_path)
+                                    total_file_tokens = tokens_in_file + tokens_in_path
+                                
+                                    self.context.append({
+                                        "type": "file",
+                                        "path": file_path,
+                                        "content": updated_content,
+                                        "tokens": total_file_tokens,
+                                    })
+                                    self.current_tokens += total_file_tokens
+                                    console.print(f"[green]Added {file_path} to context[/green]")
+                                self.current_tokens += total_file_tokens
+                                console.print(f"[green]Added {file_path} to context[/green]")
+                        except Exception as e:
+                            console.print(f"[bold red]Error updating context for {file_path}:[/bold red] {str(e)}")
+        
+            except Exception as e:
+                stop_thinking.set()
+                await thinking_task
+                raise e
+            
+        except anthropic.APIStatusError as e:
+            error_message = str(e)
+            if "overloaded_error" in error_message:
+                console.print("\r[bold red]Error: Claude API is currently overloaded. Please try again in a few moments.[/bold red]")
+            else:
+                console.print(f"\r[bold red]API Error communicating with Claude:[/bold red] {str(e)}")
         except Exception as e:
-            console.print(f"[bold red]Error asking Claude:[/bold red] {str(e)}")
+            console.print(f"\r[bold red]Error communicating with Claude:[/bold red] {str(e)}")
+
 
     async def handle_change(self, file_path: str, prompt: str):
         """Generate a diff and modify a file based on the prompt."""
@@ -857,8 +1062,8 @@ class ClaudeSonnetCodeAssistant:
                 new_content = ""
                 if hasattr(response, 'content'):
                     for block in response.content:
-                        if hasattr(block, 'text'):
-                            new_content += block.text
+                        # Safely extract text from block
+                        new_content += getattr(block, 'text', '')
 
                 # Clean up the response to extract just the code
                 if "```" in new_content:
@@ -972,9 +1177,10 @@ class ClaudeSonnetCodeAssistant:
                 max_tokens=1000,
             )
 
-            summary = response.content[0].tex
-
+            # Generate summary
             # Format as a code summary
+            summary = getattr(response.content[0], 'text', '')
+
             formatted_summary = f"# SUMMARY OF {file_path}\n\n{summary}\n\n# Original file was {self.count_tokens(content):,} tokens and has been summarized."
 
             return formatted_summary
