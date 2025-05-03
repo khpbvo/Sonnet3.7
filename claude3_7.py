@@ -364,9 +364,101 @@ class ClaudeSonnetCodeAssistant:
             console.print(f"[bold red]Error listing directory:[/bold red] {str(e)}")
 
     async def handle_generate(self, file_path: str, prompt: str):
-        """Request Claude to generate code for a file using the text_editor_20250124 tool."""
-        # Use a more explicit prompt that refers to the exact tool name
-        await self.ask_claude(f"Please generate code for the file '{file_path}' with the following requirements: {prompt}. Use the text_editor_20250124 tool to create or edit the file as needed.")
+        """Generate code for a new file based on the prompt."""
+        try:
+            # Check if file already exists
+            resolved_path = await self.resolve_path(file_path)
+            if os.path.exists(resolved_path):
+                console.print(f"[bold yellow]Warning: File {file_path} already exists.[/bold yellow]")
+                overwrite = input("Overwrite? (y/n): ").strip().lower()
+                if overwrite != 'y':
+                    console.print(f"[yellow]Operation canceled.[/yellow]")
+                    return
+    
+            # Display an animated thinking indicator
+            stop_thinking = asyncio.Event()
+            thinking_task = asyncio.create_task(self._animate_thinking(stop_thinking))
+    
+            try:
+                # Use direct API call to generate content for the file
+                request_prompt = f"""
+                Please generate code for a new file named '{file_path}' with these requirements: {prompt}
+                
+                Return ONLY the complete content for the new file without any explanations or markdown.
+                """
+    
+                response = await self.client.messages.create(
+                    model=self.model,
+                    messages=[MessageParam(role="user", content=request_prompt)],
+                    max_tokens=4000,
+                    stream=False
+                )
+    
+                stop_thinking.set()
+                await thinking_task
+                console.print("\r" + " " * 60 + "\r", end="")
+    
+                # Extract the content from Claude's response
+                new_content = ""
+                if hasattr(response, 'content'):
+                    for block in response.content:
+                        # Safely extract text from block
+                        new_content += getattr(block, 'text', '')
+    
+                # Clean up the response to extract just the code
+                if "```" in new_content:
+                    # Extract code between the first and last backtick blocks
+                    start_idx = new_content.find("```")
+                    if start_idx != -1:
+                        # Find the language identifier line and skip it
+                        start_idx = new_content.find("\n", start_idx) + 1
+                        end_idx = new_content.rfind("```")
+                        if end_idx > start_idx:
+                            new_content = new_content[start_idx:end_idx].strip()
+    
+                # Show the generated content
+                file_ext = os.path.splitext(file_path)[1].lstrip(".") or "txt"
+                syntax = Syntax(new_content, file_ext, line_numbers=True)
+                console.print(Panel(syntax, title=f"Generated code for {file_path}"))
+    
+                # Ask for confirmation
+                console.print("[bold yellow]Save this content to the file?[/bold yellow]")
+                confirm = input("[y]es/[n]o: ").strip().lower()
+    
+                if confirm in ['y', 'yes']:
+                    # Create directory if it doesn't exist
+                    dir_path = os.path.dirname(resolved_path)
+                    if dir_path:
+                        os.makedirs(dir_path, exist_ok=True)
+                    
+                    # Write the content to the file
+                    with open(resolved_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+    
+                    console.print(f"[green]Successfully created {file_path}[/green]")
+    
+                    # Add the file to context
+                    tokens_in_file = self.count_tokens(new_content)
+                    tokens_in_path = self.count_tokens(file_path)
+                    total_file_tokens = tokens_in_file + tokens_in_path
+                    self.context.append({
+                        "type": "file",
+                        "path": file_path,
+                        "content": new_content,
+                        "tokens": total_file_tokens,
+                    })
+                    self.current_tokens += total_file_tokens
+                    console.print(f"[green]Added {file_path} to context[/green]")
+                else:
+                    console.print(f"[yellow]File {file_path} was not created.[/yellow]")
+    
+            except Exception as e:
+                stop_thinking.set() 
+                await thinking_task
+                raise e
+    
+        except Exception as e:
+            console.print(f"[bold red]Error handling code generation:[/bold red] {str(e)}")
 
     async def _handle_change_deprecated(self, file_path: str, prompt: str):
         """Deprecated implementation - kept for reference."""
@@ -789,14 +881,29 @@ class ClaudeSonnetCodeAssistant:
                     max_tokens=4000,
                     stream=False,  # Changed to non-streaming for simplicity
                     tools=[{
-                        "name": "text_editor_20250124",  # Correct tool name as per Anthropic docs
+                        "name": "text_editor_20250124",
                         "description": "A tool for viewing and editing files on disk.",
-                        "custom": {
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {},
-                                "required": []
-                            }
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "enum": ["view", "str_replace", "create", "insert", "append", "undo_edit"],
+                                    "description": "The command to execute on the file"
+                                },
+                                "path": {
+                                    "type": "string",
+                                    "description": "The path to the file to operate on"
+                                },
+                                "find": {"type": "string", "description": "For str_replace: the text to find"},
+                                "replace": {"type": "string", "description": "For str_replace: the text to replace with"},
+                                "text": {"type": "string", "description": "For create/insert/append: the text to write"},
+                                "line": {"type": "integer", "description": "For insert: the line number to insert at"},
+                                "col": {"type": "integer", "description": "For insert: the column to insert at"},
+                                "with_line_numbers": {"type": "boolean", "description": "For view: whether to include line numbers"},
+                                "backup_path": {"type": "string", "description": "For undo_edit: the path to the backup file"}
+                            },
+                            "required": ["command", "path"]
                         }
                     }]
                 )
@@ -828,7 +935,7 @@ class ClaudeSonnetCodeAssistant:
                                 first_line = tool_result.split(os.linesep)[0]
                                 console.print(f"[dim]{first_line}...[/dim]")
                         
-                                # Track modified files for context updates
+                            # Track modified files for context updates
                             if tool_command in ['str_replace', 'create', 'insert', 'append'] and tool_path:
                                 modified_files.add(tool_path)
                         
@@ -847,15 +954,32 @@ class ClaudeSonnetCodeAssistant:
                                 max_tokens=4000,
                                 stream=False,
                                 tools=[{
-                                    "name": "text_editor_20250124",  # Correct tool name
+                                    "name": "text_editor_20250124",
                                     "description": "A tool for viewing and editing files on disk.",
-                                    "custom": { "input_schema": {
+                                    "input_schema": {
                                         "type": "object",
-                                        "properties": {},
-                                        "required": []
-                                    } }
-                                    }]
-                                )
+                                        "properties": {
+                                            "command": {
+                                                "type": "string",
+                                                "enum": ["view", "str_replace", "create", "insert", "append", "undo_edit"],
+                                                "description": "The command to execute on the file"
+                                            },
+                                            "path": {
+                                                "type": "string",
+                                                "description": "The path to the file to operate on"
+                                            },
+                                            "find": {"type": "string", "description": "For str_replace: the text to find"},
+                                            "replace": {"type": "string", "description": "For str_replace: the text to replace with"},
+                                            "text": {"type": "string", "description": "For create/insert/append: the text to write"},
+                                            "line": {"type": "integer", "description": "For insert: the line number to insert at"},
+                                            "col": {"type": "integer", "description": "For insert: the column to insert at"},
+                                            "with_line_numbers": {"type": "boolean", "description": "For view: whether to include line numbers"},
+                                            "backup_path": {"type": "string", "description": "For undo_edit: the path to the backup file"}
+                                        },
+                                        "required": ["command", "path"]
+                                    }
+                                }]
+                            )
                         
                             # Handle nested tool uses recursively
                             if hasattr(tool_response, 'tool_uses') and tool_response.tool_uses:
@@ -892,7 +1016,33 @@ class ClaudeSonnetCodeAssistant:
                                                 }
                                             ],
                                             max_tokens=4000,
-                                            stream=False
+                                            stream=False,
+                                            tools=[{
+                                                "name": "text_editor_20250124",
+                                                "description": "A tool for viewing and editing files on disk.",
+                                                "input_schema": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "command": {
+                                                            "type": "string",
+                                                            "enum": ["view", "str_replace", "create", "insert", "append", "undo_edit"],
+                                                            "description": "The command to execute on the file"
+                                                        },
+                                                        "path": {
+                                                            "type": "string",
+                                                            "description": "The path to the file to operate on"
+                                                        },
+                                                        "find": {"type": "string", "description": "For str_replace: the text to find"},
+                                                        "replace": {"type": "string", "description": "For str_replace: the text to replace with"},
+                                                        "text": {"type": "string", "description": "For create/insert/append: the text to write"},
+                                                        "line": {"type": "integer", "description": "For insert: the line number to insert at"},
+                                                        "col": {"type": "integer", "description": "For insert: the column to insert at"},
+                                                        "with_line_numbers": {"type": "boolean", "description": "For view: whether to include line numbers"},
+                                                        "backup_path": {"type": "string", "description": "For undo_edit: the path to the backup file"}
+                                                    },
+                                                    "required": ["command", "path"]
+                                                }
+                                            }]
                                         )
                                     
                                     
@@ -973,11 +1123,9 @@ class ClaudeSonnetCodeAssistant:
                                     })
                                     self.current_tokens += total_file_tokens
                                     console.print(f"[green]Added {file_path} to context[/green]")
-                                self.current_tokens += total_file_tokens
-                                console.print(f"[green]Added {file_path} to context[/green]")
                         except Exception as e:
                             console.print(f"[bold red]Error updating context for {file_path}:[/bold red] {str(e)}")
-        
+    
             except Exception as e:
                 stop_thinking.set()
                 await thinking_task
@@ -991,7 +1139,6 @@ class ClaudeSonnetCodeAssistant:
                 console.print(f"\r[bold red]API Error communicating with Claude:[/bold red] {str(e)}")
         except Exception as e:
             console.print(f"\r[bold red]Error communicating with Claude:[/bold red] {str(e)}")
-
 
     async def handle_change(self, file_path: str, prompt: str):
         """Generate a diff and modify a file based on the prompt."""
